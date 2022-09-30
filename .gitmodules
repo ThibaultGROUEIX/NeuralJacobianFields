@@ -1,0 +1,3 @@
+[submodule "dataset_generation/human_db/STAR"]
+	path = dataset_generation/human_db/STAR
+	url = https://github.com/ThibaultGROUEIX/STAR
