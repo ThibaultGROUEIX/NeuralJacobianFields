@@ -1,4 +1,5 @@
-## NJF  [[Paper]](https://arxiv.org/abs/2205.02904) [[Talk]](http://imagine.enpc.fr/~groueixt/njf/slides.pptx)[[Tweet]](http://imagine.enpc.fr/~groueixt/atlasnet/)
+## NJF  [[Paper]](https://arxiv.org/abs/2205.02904)([Tweet)](https://twitter.com/AigermanNoam/status/1524433177929940992?s=20&t=i__gwz_kGGVt67crBJpFVg)
+
 **Neural Jacobian Fields: Learning Intrinsic Mappings of Arbitrary Meshes** <br>
 N. Aigerman, K. Gupta, V. G. Kim, S. Chaudhuri, J. Saito, T. Groueix <br>
 In [SIGGRAPH, 2022](https://s2022.siggraph.org/).
