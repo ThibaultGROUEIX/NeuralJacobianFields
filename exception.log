@@ -1,0 +1,63 @@
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmp94ogdz3_
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmp94ogdz3_/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withWKS.ckpt
+DEBUG:trimesh:generating face normals
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpze8jm9kz
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpze8jm9kz/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withWKS.ckpt
+DEBUG:trimesh:generating face normals
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmp3s_dss4x
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmp3s_dss4x/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withWKS.ckpt
+DEBUG:trimesh:generating face normals
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmph7xditru
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmph7xditru/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withWKS.ckpt
+DEBUG:trimesh:generating face normals
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpyodupr0f
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpyodupr0f/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withWKS.ckpt
+DEBUG:trimesh:generating face normals
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpikir85cf
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpikir85cf/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withWKS.ckpt
+DEBUG:trimesh:generating face normals
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpuvrrls5t
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpuvrrls5t/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withoutWKS.ckpt
+DEBUG:trimesh:generating face normals
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpfstgb9gz
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpfstgb9gz/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withoutWKS.ckpt
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpng1mnf9g
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpng1mnf9g/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withoutWKS.ckpt
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpxzxuaae3
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpxzxuaae3/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withoutWKS.ckpt
+INFO:torch.distributed.nn.jit.instantiator:Created a temporary directory at /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpl7ynefl_
+INFO:torch.distributed.nn.jit.instantiator:Writing /var/folders/f5/y15_trrn23984v08hr81kvq00000gn/T/tmpl7ynefl_/_remote_module_non_scriptable.py
+DEBUG:matplotlib:CACHEDIR=/Users/thibaultgroueix/.matplotlib
+DEBUG:matplotlib.font_manager:Using fontManager instance from /Users/thibaultgroueix/.matplotlib/fontlist-v330.json
+DEBUG:fsspec.local:open file: /Users/thibaultgroueix/release/neural_jacobian_fields/data/checkpoints/morph_any_shape_into_any_other_withoutWKS.ckpt
+DEBUG:trimesh:generating face normals

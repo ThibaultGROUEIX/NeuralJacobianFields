@@ -1,0 +1,20 @@
+{
+    "pairs": [
+        [
+            "mesh_000.off",
+            "mesh_000.off"
+        ],
+        [
+            "mesh_000.off",
+            "mesh_001.off"
+        ],
+        [
+            "mesh_000.off",
+            "mesh_002.off"
+        ],
+        [
+            "mesh_000.off",
+            "mesh_003.off"
+        ],
+    ]
+}
