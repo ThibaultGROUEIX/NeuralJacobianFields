@@ -8,7 +8,7 @@ In [SIGGRAPH, 2022](https://s2022.siggraph.org/).
 
 #  TLDR
 
-NJF is a neural network architecture that can deform a mesh into another mesh. Its most remarkable strenght is that to be agnostic to triangulation *i.e.* you will get exactly the same result if you remesh your shapes.
+NJF is a neural network architecture that can deform a mesh into another mesh. Its most remarkable strenght is to be agnostic to triangulation *i.e.* you will get exactly the same deformation results if you retriangulate your input shapes.
 
 
 NJF is  a  general  approach. To train, you need a folder of meshes, and a list of training pairs (source, target) indexing this folder. NJF can learn parameterization, registration, morphing, ARAP deformations... Please see the paper for the full list of application we explored.
