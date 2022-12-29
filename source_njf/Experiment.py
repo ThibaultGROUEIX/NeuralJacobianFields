@@ -49,8 +49,6 @@ class Experiment(ABC):
         '''
         pass
 
-
-
     def load_network(self,checkpoint_path):
         '''
         load a network from a checkpoint, and store it internally

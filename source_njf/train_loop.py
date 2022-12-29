@@ -1,5 +1,4 @@
 #defines the network and the train loop
-
 import warnings
 
 import igl
@@ -8,7 +7,6 @@ import numpy as np
 import numpy.random
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-
 import DeformationEncoder
 import SourceToTargetsFile
 from results_saving_scripts import save_mesh_with_uv
@@ -18,6 +16,7 @@ from torch import nn
 import torch
 import PerCentroidBatchMaker
 import time
+
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.seed import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -170,7 +169,7 @@ class MyNet(pl.LightningModule):
             x = x[:, :self.code_dim + self.point_dim]
 
         return self.per_face_decoder(x.type(self.per_face_decoder[0].bias.type()))
-
+    
     def predict_jacobians(self, source, target):
         '''
 		given a batch class, predict jacobians
@@ -256,12 +255,9 @@ class MyNet(pl.LightningModule):
         pred_J = self.predict_jacobians(source, target)
         if self.args.align_2D:  # if the target is in 2D the last column of J is 0
             pred_J[:, :,2] = 0  # TODO this line is sus, shouldn't it be pred_J[:,:,2,:], and in any case this hould happen w.r.t. restricted jacobians!!!!
-        # pred_V = torch.zeros((1, 6890, 3), device=self.device)+  torch.mean(pred_J)
-        # pred_J_restricted = torch.zeros((1, 13776, 3, 2), device=self.device) +  torch.mean(pred_J)
-        if self.training and self.args.no_vertex_loss and not self.global_step % FREQUENCY == 0:
-            pred_V = source.get_vertices().unsqueeze(0).to(self.device)
-        else:
-            pred_V = source.vertices_from_jacobians(pred_J)
+            
+        # TODO: debug this -- check shape of pred_V and what happens when align_2D is turned on? 
+        pred_V = source.vertices_from_jacobians(pred_J)
         pred_J_restricted = source.restrict_jacobians(pred_J) # Should'nt this line come before?
         return pred_V, pred_J, pred_J_restricted
 
@@ -273,6 +269,7 @@ class MyNet(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         return self.my_step(batch, batch_idx)
 
+    ### TRAINING STEP HERE ###
     def my_step(self, source_batch, batch_idx, test=False):
         vertex_loss = torch.tensor(0.0, device=self.device)
         jacobian_loss = torch.tensor(0.0, device=self.device)
@@ -285,33 +282,30 @@ class MyNet(pl.LightningModule):
 
         pred_V, pred_J, pred_J_restricted = self.predict_map(source, target)
 
-
-
+        # TODO: Get UV coordinates from pred_V and pass through ARAP counting loss 
         GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target)
-
 
         if UNIT_TEST_POISSON_SOLVE:
             success = self.check_map(source, target, GT_J, GT_V) < 0.0001
             print(self.check_map(source, target, GT_J, GT_V))
             assert(success), f"UNIT_TEST_POISSON_SOLVE FAILED!! {self.check_map(source, target, GT_J, GT_V)}"
 
-        # compute losses
+        # Compute losses 
+        # TODO: get tensor vertices, faces, and face areas 
+        from losses import arap, count_loss, get_local_tris, meshArea2D
+        vertices = source.get_vertices() 
+        faces = source.get_source_triangles()
+        local_tris = get_local_tris(vertices, faces, device=self.device)
+        pred_UV = pred_V[:,:2]
+        # Compute face areas for counting loss  
+        fareas = meshArea2D(vertices, faces, return_fareas=True)
+        arapenergy = arap(local_tris, faces, pred_UV,
+                            device=self.device, renormalize=False,
+                            return_face_energy=True, timeit=self.opt.time)
+        countloss = count_loss(arapenergy, fareas, return_softloss=False, device=self.device, 
+                                threshold = 0.01)
 
-        if not self.args.no_vertex_loss:
-            # predict jacobians close as possible to GT
-            pred_V = pred_V - pred_V.mean(1, keepdim=True) + GT_V.mean(1, keepdim=True) 
-            vertex_loss += self.mse(pred_V, GT_V)
-
-        if not self.args.no_jacobian_loss:
-            if self.args.normalize_jac_loss:
-                norms = torch.linalg.norm(GT_J_restricted, dim=(2, 3))
-                norms = 1 / torch.clamp(norms, 1e-2, 1e2).unsqueeze(-1).unsqueeze(-1)
-                # comp = GT_J_restricted[i]/norms
-                jacobian_loss += self.mse(GT_J_restricted / norms, pred_J_restricted / norms)
-            else:
-                jacobian_loss += self.mse(GT_J_restricted, pred_J_restricted)
-
-        loss = (self.args.vertex_loss_weight * vertex_loss + jacobian_loss)
+        loss = countloss
         loss = loss.type_as(GT_V)
         val_loss = loss
         if self.verbose:
@@ -322,19 +316,17 @@ class MyNet(pl.LightningModule):
             "source_V": source.get_vertices().detach(),
             "loss": loss,
             "val_loss": val_loss,
-            "vertex_loss": vertex_loss.detach(),
-            "jacobian_loss": jacobian_loss.detach(),
+            "count_loss": countloss.detach(), 
             "pred_V": pred_V.detach(),
             "T": source.get_source_triangles(),
             'source_ind': source.source_ind,
             'target_inds': target.target_inds
-            # "source_samples": batches.get_batch(0).get_loaded_data(True,"samples").detach()
         }
 
         if self.args.test:
             ret['pred_J_R'] = pred_J_restricted.detach()
             ret['target_J_R'] = GT_J_restricted.detach()
-            ret['pred_time'] = pred_time
+            
         return ret
 
     def validation_step_end(self, batch_parts):
@@ -351,9 +343,7 @@ class MyNet(pl.LightningModule):
         tb = self.logger.experiment
         if self.log_validate:
             self.log_validate = False
-            tb.add_scalar("valid vertex loss", batch_parts["vertex_loss"].mean(), global_step=self.global_step)
-            tb.add_scalar("valid jacobian loss", batch_parts["jacobian_loss"].mean(),
-                          global_step=self.global_step)
+            tb.add_scalar("valid count loss", batch_parts["count_loss"].mean(), global_step=self.global_step)
             colors = self.colors(batch_parts["source_V"].cpu().numpy(), batch_parts["T"])
             # Replace here vertices and faces by something useful.
 
@@ -372,7 +362,7 @@ class MyNet(pl.LightningModule):
                 print("saving validation intermediary results.")
                 for idx in range(len(batch_parts["pred_V"])):
                     path = Path(self.logger.log_dir) / f"valid_batchidx_{idx}.png"
-                    plot_uv(path, batch_parts["target_V"][idx].squeeze().detach(),
+                    plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach(),
                             batch_parts["pred_V"][idx].squeeze().detach(), batch_parts["T"][idx].squeeze())
 
         # self.log('valid_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
@@ -596,17 +586,17 @@ class MyNet(pl.LightningModule):
                         faces=numpy.expand_dims(batch_parts["T"], 0),
                         global_step=self.global_step, colors=colors)
             # tb.add_mesh("source_samples", vertices = batch_parts["source_samples"][0].unsqueeze(0), global_step=self.global_step)
-            tb.add_scalar("train vertex loss", batch_parts["vertex_loss"].mean().item(), global_step=self.global_step)
-            tb.add_scalar("train jacobian loss", batch_parts["jacobian_loss"].mean().item(), global_step=self.global_step)
+            tb.add_scalar("train count loss", batch_parts["count_loss"].mean().item(), global_step=self.global_step)
             tb.add_scalar("train loss", batch_parts["loss"].mean().item(), global_step=self.global_step)
 
         # self.log('train_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
+        # TODO: Hack -- we dont have GT UVs for training this 
         if self.args.xp_type == "uv":
             if self.global_step % 100 == -1:
                 print("saving training intermediary results.")
                 for idx in range(len(batch_parts["pred_V"])):
                     path = Path(self.logger.log_dir) / f"train_batchidx_{idx}.png"
-                    plot_uv(path, batch_parts["target_V"][idx].squeeze().detach(),
+                    plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach(),
                             batch_parts["pred_V"][idx].squeeze().detach(), batch_parts["T"][idx].squeeze())
         return loss
 
@@ -687,6 +677,7 @@ def main(gen, log_dir_name, args):
     seed_everything(48, workers=True)
 
     if not args.compute_human_data_on_the_fly:
+        ### DEFAULT GOES HERE ###
         with open(os.path.join(args.root_dir_train, args.data_file)) as file:
             data = json.load(file)
             pairs_train = data['pairs']
@@ -718,6 +709,7 @@ def main(gen, log_dir_name, args):
                 train_pairs = pairs_train
                 
     else:
+        ### DEFAULT GOES HERE ###
         if not args.compute_human_data_on_the_fly:
             with open(os.path.join(args.root_dir_test, args.data_file)) as file:
                 data = json.load(file)
@@ -757,7 +749,7 @@ def main(gen, log_dir_name, args):
                          num_nodes=1,
                          deterministic= args.deterministic,
                          strategy='ddp',
-                         callbacks=[checkpoint_callback,lr_monitor])  # , callbacks = [lr_monitor])#,auto_lr_find=True)#,max_steps = 5,strategy="ddp")#,accumulate_grad_batches=1
+                         callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
 
     if trainer.precision == 16:
@@ -794,12 +786,6 @@ def main(gen, log_dir_name, args):
         model = MyNet(gen, gen.get_code_length(train_dataset), point_dim=train_dataset.get_point_dim(), args=args)
 
     model.type(use_dtype)
-    # if not LOADING_CHECKPOINT:
-    # 	r_finder = trainer.tuner.lr_find(model)  # Run learning rate finder
-    # 	trainstep = r_finder.suggestion()
-    # training
-    # ================ #
-    # trainer = pl.Trainer(gpus=1, precision=16, log_every_n_steps=3, deterministic=False,max_epochs=1000,max_steps = 5, profiler="advanced")#,accumulate_grad_batches=1)
     model.lr = args.lr
     # trainer.tune(model)
     if args.overfit_one_batch:
@@ -822,7 +808,7 @@ def main(gen, log_dir_name, args):
                                   num_workers=0)
 
         trainer = pl.Trainer(gpus=1, precision=32, max_epochs=10000,
-                             overfit_batches=1)  # ,  callbacks=[ModelSummary(max_depth=-1)])#,max_steps = 5,strategy="ddp")#,accumulate_grad_batches=1)
+                             overfit_batches=1)
         trainer.fit(model, train_loader)
         return
 

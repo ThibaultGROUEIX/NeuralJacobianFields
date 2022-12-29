@@ -1,5 +1,4 @@
 import torch
-
 import SourceMesh
 from models import Encoder as Encoder
 
@@ -90,9 +89,6 @@ class DeformationEncoder(torch.nn.Module):
         self.__ttype = None
         self.__args = args
 
-    # def type(self, ttype):
-    #     super().type( ttype)
-    #     self.__ttype = ttype
     def __add_generator(self, source_or_target:bool, generator:PartialDeformationEncoderBase):
         '''
         add the given encoder
