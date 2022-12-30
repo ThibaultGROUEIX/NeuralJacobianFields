@@ -5,6 +5,7 @@
 *.m~
 *.vscode
 *scratch*
+lightning_logs
 
 # data files
 MeshCNN/checkpoints

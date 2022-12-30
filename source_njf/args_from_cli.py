@@ -29,6 +29,7 @@ def get_arg_parser():
 						action="store_true")
 	parser.add_argument("--train_percentage",help = "the train/test split in percentage, default is 90",default=90,type=int)
 	parser.add_argument("--val_interval",help = "validation interval",default=0.05,type=float)
+	parser.add_argument("--epochs",help = "number of training epochs",default=2000,type=int)
 
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
 						action="store_true")
@@ -65,6 +66,7 @@ def get_arg_parser():
 	parser.add_argument("--gpu_strategy",help ="default: no op (whatever lightning does by default). ddp: use the ddp multigpu startegy; spawn: use the ddpspawn strategy",default=None,choices={'ddp','ddpspawn', 'cpuonly'})
 	parser.add_argument("--no_validation",help = "skip validation",action="store_true")
 	parser.add_argument("--n_gpu", help="num of gpus, default is all", type=int, default=-1)
+	parser.add_argument("--n_devices", help="more general version of n_gpu, defaults to cpu", type=int, default=1)
 	parser.add_argument("--pointnet_layer_normalization",help = "type of normalization for the PointNet encoder's layers",default="GROUPNORM",type=str,choices={'GROUPNORM','BATCHNORM','IDENTITY'})
 	parser.add_argument("--layer_normalization",help = "type of normalization for the decoder's layers",default="GROUPNORM",type=str,choices={'GROUPNORM','GROUPNORM2', 'BATCHNORM','IDENTITY', 'LAYERNORM'})
 	parser.add_argument("--overfit_one_batch", help="overfit a particular batch of the training data",action="store_true")

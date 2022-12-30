@@ -18,14 +18,15 @@ import PerCentroidBatchMaker
 import time
 
 import pytorch_lightning as pl
-from pytorch_lightning.utilities.seed import seed_everything
+from lightning_lite.utilities.seed import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks import LearningRateMonitor
 
 USE_CUPY = False
+has_gpu = "cpu" 
 if USE_CUPY and torch.cuda.is_available():
     import cupy
-
+    has_gpu="gpu"
 
 import math
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -294,14 +295,15 @@ class MyNet(pl.LightningModule):
         # TODO: get tensor vertices, faces, and face areas 
         from losses import arap, count_loss, get_local_tris, meshArea2D
         vertices = source.get_vertices() 
-        faces = source.get_source_triangles()
+        faces = torch.from_numpy(source.get_source_triangles()).long()
         local_tris = get_local_tris(vertices, faces, device=self.device)
-        pred_UV = pred_V[:,:2]
-        # Compute face areas for counting loss  
+        pred_UV = pred_V[0,:,:2]
+        # Compute face areas for counting loss 
+        # TODO: BATCH BELOW 
         fareas = meshArea2D(vertices, faces, return_fareas=True)
         arapenergy = arap(local_tris, faces, pred_UV,
                             device=self.device, renormalize=False,
-                            return_face_energy=True, timeit=self.opt.time)
+                            return_face_energy=True, timeit=False)
         countloss = count_loss(arapenergy, fareas, return_softloss=False, device=self.device, 
                                 threshold = 0.01)
 
@@ -358,7 +360,7 @@ class MyNet(pl.LightningModule):
                         global_step=self.global_step, colors=colors)
         # self.log('validation_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
         if self.args.xp_type == "uv":
-            if self.val_step_iter % 1000 == -1:
+            if self.val_step_iter % 100 == 0:
                 print("saving validation intermediary results.")
                 for idx in range(len(batch_parts["pred_V"])):
                     path = Path(self.logger.log_dir) / f"valid_batchidx_{idx}.png"
@@ -394,7 +396,7 @@ class MyNet(pl.LightningModule):
         #
         # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
         if self.args.xp_type == "uv":
-            if self.val_step_iter % 1000 == -1:
+            if self.val_step_iter % 100 == 0:
                 print("saving validation intermediary results.")
                 for idx in range(len(batch_parts["pred_V"])):
                     path = Path(self.logger.log_dir) / f"valid_batchidx_{idx}.png"
@@ -590,14 +592,18 @@ class MyNet(pl.LightningModule):
             tb.add_scalar("train loss", batch_parts["loss"].mean().item(), global_step=self.global_step)
 
         # self.log('train_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
-        # TODO: Hack -- we dont have GT UVs for training this 
         if self.args.xp_type == "uv":
-            if self.global_step % 100 == -1:
+            if self.global_step % 100 == 0:
                 print("saving training intermediary results.")
-                for idx in range(len(batch_parts["pred_V"])):
-                    path = Path(self.logger.log_dir) / f"train_batchidx_{idx}.png"
-                    plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach(),
-                            batch_parts["pred_V"][idx].squeeze().detach(), batch_parts["T"][idx].squeeze())
+                if len(batch_parts["pred_V"]) == 1: 
+                    path = os.path.join(self.logger.log_dir, f"train_{self.global_step}.png")                        
+                    plot_uv(path, batch_parts["pred_V"].squeeze().detach().numpy(),
+                            batch_parts["pred_V"].squeeze().detach().numpy(), batch_parts["T"].squeeze())
+                else:
+                    for idx in range(len(batch_parts["pred_V"])):
+                        path = os.path.join(self.logger.log_dir, f"train_{self.global_step}_batch{idx}.png")                    
+                        plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach().numpy(),
+                                batch_parts["pred_V"][idx].squeeze().detach().numpy(), batch_parts["T"][idx].squeeze())
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx, unused=0):
@@ -738,8 +744,8 @@ def main(gen, log_dir_name, args):
     checkpoint_callback = ModelCheckpoint(every_n_train_steps=500)
     lr_monitor = LearningRateMonitor(logging_interval='step')
     ################################ TRAINER #############################
-    trainer = pl.Trainer(gpus=args.n_gpu, precision=args.precision, log_every_n_steps=200, 
-                         max_epochs=10000, sync_batchnorm=args.n_gpu != 1,
+    trainer = pl.Trainer(accelerator=has_gpu, devices=args.n_devices, precision=args.precision, log_every_n_steps=200, 
+                         max_epochs=args.epochs, sync_batchnorm=args.n_devices != 1,
                          val_check_interval=(1.0 if args.no_validation else args.val_interval), logger=logger,
                          plugins=None,
                          accumulate_grad_batches=args.accumulate_grad_batches,
@@ -748,7 +754,7 @@ def main(gen, log_dir_name, args):
                          enable_progress_bar=True,
                          num_nodes=1,
                          deterministic= args.deterministic,
-                         strategy='ddp',
+                         strategy='ddp' if torch.cuda.is_available() else None,
                          callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
 
@@ -807,7 +813,7 @@ def main(gen, log_dir_name, args):
         train_loader = DataLoader(local_dataset, batch_size=1, collate_fn=custom_collate, pin_memory=(args.unpin_memory is None),
                                   num_workers=0)
 
-        trainer = pl.Trainer(gpus=1, precision=32, max_epochs=10000,
+        trainer = pl.Trainer(accelerator=has_gpu, devices=args.n_devices, precision=32, max_epochs=10000,
                              overfit_batches=1)
         trainer.fit(model, train_loader)
         return

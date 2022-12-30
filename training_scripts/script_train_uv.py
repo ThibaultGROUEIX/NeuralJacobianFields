@@ -1,9 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'source_njf'))
-print("hello")
 from Experiment import Experiment
-print("hello")
 
 class UVExperiment(Experiment):
     def __init__(self, cpuonly=False):
@@ -21,7 +19,6 @@ if __name__ == '__main__':
     sys.argv.append("./data/cylinderbody")
     sys.argv.append("--root_dir_test")
     sys.argv.append("./data/cylinderbody")
-
   
     sys.argv.append("--experiment_type")
     sys.argv.append("DEFAULT")
@@ -29,10 +26,12 @@ if __name__ == '__main__':
     sys.argv.append("1")
     sys.argv.append("--size_test")
     sys.argv.append("1")
+    sys.argv.append("--epochs")
+    sys.argv.append("4000")
     sys.argv.append("--data_file")
     sys.argv.append("cylindertest.json")
     sys.argv.append("--no_validation")
-    sys.argv.append("--overfit_one_batch")
+    # sys.argv.append("--overfit_one_batch")
     sys.argv.append("--align_2D")
     sys.argv.append("--xp_type")
     sys.argv.append("uv")
