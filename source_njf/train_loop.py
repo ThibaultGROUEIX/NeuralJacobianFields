@@ -733,12 +733,12 @@ def main(gen, log_dir_name, args):
 
     logger = TensorBoardLogger("lightning_logs", name=log_dir_name)
 
-    if args.gpu_strategy:
-        if os.name != 'nt':  # no support for windows because of gloo
-            if args.gpu_strategy == 'ddp':
-                plugins = pl.plugins.training_type.DDPPlugin(find_unused_parameters=False)
-            elif args.gpu_strategy == 'ddp_spawn':
-                plugins = pl.plugins.training_type.DDPSpawnPlugin(find_unused_parameters=False)
+    # if args.gpu_strategy:
+    #     if os.name != 'nt':  # no support for windows because of gloo
+    #         if args.gpu_strategy == 'ddp':
+    #             plugins = pl.plugins.training_type.DDPPlugin(find_unused_parameters=False)
+    #         elif args.gpu_strategy == 'ddp_spawn':
+    #             plugins = pl.plugins.training_type.DDPSpawnPlugin(find_unused_parameters=False)
     #
 
     checkpoint_callback = ModelCheckpoint(every_n_train_steps=500)
