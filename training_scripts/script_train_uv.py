@@ -36,7 +36,7 @@ if __name__ == '__main__':
     sys.argv.append("--xp_type")
     sys.argv.append("uv")
     sys.argv.append("--gpu_strategy")
-    sys.argv.append("cpuonly")
+    sys.argv.append("ddp")
 
     sys.argv.append("--targets_per_batch")
     sys.argv.append("16")
