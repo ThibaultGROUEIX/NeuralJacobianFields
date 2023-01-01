@@ -27,7 +27,7 @@ if __name__ == '__main__':
     sys.argv.append("--size_test")
     sys.argv.append("1")
     sys.argv.append("--epochs")
-    sys.argv.append("4000")
+    sys.argv.append("8000")
     sys.argv.append("--data_file")
     sys.argv.append("cylindertest.json")
     sys.argv.append("--no_validation")

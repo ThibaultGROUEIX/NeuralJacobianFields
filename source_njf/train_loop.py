@@ -305,7 +305,7 @@ class MyNet(pl.LightningModule):
                             device=self.device, renormalize=False,
                             return_face_energy=True, timeit=False)
         countloss = count_loss(arapenergy, fareas, return_softloss=False, device=self.device, 
-                                threshold = 0.01)
+                                threshold = 1e-8)
 
         loss = countloss
         loss = loss.type_as(GT_V)
