@@ -37,7 +37,9 @@ if __name__ == '__main__':
     sys.argv.append("uv")
     sys.argv.append("--gpu_strategy")
     sys.argv.append("ddp")
-
+    sys.argv.append("--losstype")
+    sys.argv.append("distortion")
+    
     sys.argv.append("--targets_per_batch")
     sys.argv.append("16")
     sys.argv.append("--accumulate_grad_batches")

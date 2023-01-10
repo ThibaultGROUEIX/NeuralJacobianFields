@@ -363,7 +363,7 @@ class MyNet(pl.LightningModule):
             if self.val_step_iter % 100 == 0:
                 print("saving validation intermediary results.")
                 for idx in range(len(batch_parts["pred_V"])):
-                    path = Path(self.logger.log_dir) / f"valid_batchidx_{idx}.png"
+                    path = Path(self.logger.log_dir) / f"valid_batchidx_{idx:04}.png"
                     plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach(),
                             batch_parts["pred_V"][idx].squeeze().detach(), batch_parts["T"][idx].squeeze())
 
@@ -399,7 +399,7 @@ class MyNet(pl.LightningModule):
             if self.val_step_iter % 100 == 0:
                 print("saving validation intermediary results.")
                 for idx in range(len(batch_parts["pred_V"])):
-                    path = Path(self.logger.log_dir) / f"valid_batchidx_{idx}.png"
+                    path = Path(self.logger.log_dir) / f"valid_batchidx_{idx:04}.png"
                     plot_uv(path, batch_parts["target_V"][idx].squeeze().cpu().numpy(),
                             batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(), batch_parts["T"][idx].squeeze())
 
@@ -596,12 +596,12 @@ class MyNet(pl.LightningModule):
             if self.global_step % 100 == 0:
                 print("saving training intermediary results.")
                 if len(batch_parts["pred_V"]) == 1: 
-                    path = os.path.join(self.logger.log_dir, f"train_{self.global_step}.png")                        
+                    path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}.png")                        
                     plot_uv(path, batch_parts["pred_V"].squeeze().detach().numpy(),
                             batch_parts["pred_V"].squeeze().detach().numpy(), batch_parts["T"].squeeze())
                 else:
                     for idx in range(len(batch_parts["pred_V"])):
-                        path = os.path.join(self.logger.log_dir, f"train_{self.global_step}_batch{idx}.png")                    
+                        path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}_batch{idx:04}.png")                    
                         plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach().numpy(),
                                 batch_parts["pred_V"][idx].squeeze().detach().numpy(), batch_parts["T"][idx].squeeze())
         return loss
@@ -825,4 +825,15 @@ def main(gen, log_dir_name, args):
 
     print(len(train_loader))
     trainer.fit(model, train_loader, valid_loader)
-# ================ #
+    
+    # Generate gif of training process 
+    path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}.png")
+    if self.args.xp_type == "uv":
+        from PIL import Image 
+        import glob 
+        fp_in = f"{self.logger.log_dir}/*.png"
+        fp_out = f"{self.logger.log_dir}/train.gif"
+        imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+        imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                save_all=True, duration=40, loop=0, disposal=2)
+    # ================ #
