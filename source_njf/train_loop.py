@@ -292,8 +292,7 @@ class MyNet(pl.LightningModule):
             assert(success), f"UNIT_TEST_POISSON_SOLVE FAILED!! {self.check_map(source, target, GT_J, GT_V)}"
 
         # Compute losses 
-        # TODO: get tensor vertices, faces, and face areas 
-        from losses import arap, count_loss, get_local_tris, meshArea2D
+        from losses import arap, count_loss_v2, get_local_tris, meshArea2D
         vertices = source.get_vertices() 
         faces = torch.from_numpy(source.get_source_triangles()).long()
         local_tris = get_local_tris(vertices, faces, device=self.device)
@@ -304,10 +303,12 @@ class MyNet(pl.LightningModule):
         arapenergy = arap(local_tris, faces, pred_UV,
                             device=self.device, renormalize=False,
                             return_face_energy=True, timeit=False)
-        countloss = count_loss(arapenergy, fareas, return_softloss=False, device=self.device, 
-                                threshold = 1e-8)
+        if self.args.losstype == "count":
+            loss = count_loss_v2(arapenergy, fareas, return_softloss=False, device=self.device, 
+                                    threshold = 1e-8)
+        elif self.args.losstype == "distortion":
+            loss = torch.sum(arapenergy)
 
-        loss = countloss
         loss = loss.type_as(GT_V)
         val_loss = loss
         if self.verbose:
@@ -318,7 +319,6 @@ class MyNet(pl.LightningModule):
             "source_V": source.get_vertices().detach(),
             "loss": loss,
             "val_loss": val_loss,
-            "count_loss": countloss.detach(), 
             "pred_V": pred_V.detach(),
             "T": source.get_source_triangles(),
             'source_ind': source.source_ind,
@@ -345,7 +345,7 @@ class MyNet(pl.LightningModule):
         tb = self.logger.experiment
         if self.log_validate:
             self.log_validate = False
-            tb.add_scalar("valid count loss", batch_parts["count_loss"].mean(), global_step=self.global_step)
+            tb.add_scalar("valid loss", batch_parts["loss"].mean(), global_step=self.global_step)
             colors = self.colors(batch_parts["source_V"].cpu().numpy(), batch_parts["T"])
             # Replace here vertices and faces by something useful.
 
@@ -574,7 +574,7 @@ class MyNet(pl.LightningModule):
         # this next few lines make sure cupy releases all memory
         loss = batch_parts["loss"].mean()
         if self.global_step % FREQUENCY == 0:  # skipping for now AttributeError: 'MyNet' object has no attribute 'colors'
-
+            # TODO: HOW TO GET THIS TO SHOW CORRECTLY ON TENSORBOARD??
             tb = self.logger.experiment
             colors = self.colors(batch_parts["source_V"].cpu().numpy(), batch_parts["T"])
 
@@ -588,9 +588,9 @@ class MyNet(pl.LightningModule):
                         faces=numpy.expand_dims(batch_parts["T"], 0),
                         global_step=self.global_step, colors=colors)
             # tb.add_mesh("source_samples", vertices = batch_parts["source_samples"][0].unsqueeze(0), global_step=self.global_step)
-            tb.add_scalar("train count loss", batch_parts["count_loss"].mean().item(), global_step=self.global_step)
             tb.add_scalar("train loss", batch_parts["loss"].mean().item(), global_step=self.global_step)
 
+        # TODO: PLOT UV TRIANGLES WITH DISTORTION COLORS 
         # self.log('train_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
         if self.args.xp_type == "uv":
             if self.global_step % 100 == 0:

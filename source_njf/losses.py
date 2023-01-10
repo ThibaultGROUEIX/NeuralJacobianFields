@@ -484,12 +484,13 @@ def count_loss(face_errors, fareas, threshold=0.1, alpha=5, debug=False,
         return count_loss, softloss
     return count_loss
 
-# Counting loss without area normalization 
-def count_loss_v2(face_errors, fareas, threshold=0.1, alpha=2, debug=False,
+# Count loss with critical point at the threshold 
+def count_loss_v2(face_errors, fareas, threshold=0.1, alpha=5, debug=False,
                return_softloss=True, device=torch.device("cpu"), **kwargs):
     # Normalize face error by parea
     error = face_errors
-    softloss = fareas * (1 - torch.exp(-(error / threshold) ** alpha))
+    fareas = fareas / torch.sum(fareas)
+    softloss = fareas * (torch.exp(-((error - threshold) / threshold) ** alpha) - torch.exp(-torch.ones(1)).to(error.device))
     count_loss = torch.sum(softloss)
 
     if debug == True:
@@ -500,7 +501,6 @@ def count_loss_v2(face_errors, fareas, threshold=0.1, alpha=2, debug=False,
     if return_softloss == True:
         return count_loss, softloss
     return count_loss
-
 
 # Counting loss with uniformity loss
 def unif_count_loss(mesh, weights, face_errors, fareas, threshold=0.1, alpha=2, debug=False,

@@ -63,6 +63,7 @@ def get_arg_parser():
 	parser.add_argument("--normalize_jac_loss", help="normalize jacobians 1/norm(GT) when comparing them, default is false",action="store_true")
 	parser.add_argument("--precision",help ="the precision we work in, should be 16,32,or 64 (default)",default=64,type=int)
 	parser.add_argument("--vertex_loss_weight", help="the weight to place on the vertex loss (jacobian loss is unweighted) default = 1.0", default=1.0, type=float)
+ 	parser.add_argument("--losstype",help ="whether to use counting-based loss or distortion-based loss",default="count",choices={'count', "distortion"})
 	parser.add_argument("--gpu_strategy",help ="default: no op (whatever lightning does by default). ddp: use the ddp multigpu startegy; spawn: use the ddpspawn strategy",default=None,choices={'ddp','ddpspawn', 'cpuonly'})
 	parser.add_argument("--no_validation",help = "skip validation",action="store_true")
 	parser.add_argument("--n_gpu", help="num of gpus, default is all", type=int, default=-1)
