@@ -16,9 +16,9 @@ class UVExperiment(Experiment):
 
 if __name__ == '__main__':
     sys.argv.append("--root_dir_train")
-    sys.argv.append("./data/cylinderbody")
+    sys.argv.append("./data/cube3")
     sys.argv.append("--root_dir_test")
-    sys.argv.append("./data/cylinderbody")
+    sys.argv.append("./data/cube3")
   
     sys.argv.append("--experiment_type")
     sys.argv.append("DEFAULT")
@@ -27,9 +27,9 @@ if __name__ == '__main__':
     sys.argv.append("--size_test")
     sys.argv.append("1")
     sys.argv.append("--epochs")
-    sys.argv.append("8000")
+    sys.argv.append("5000")
     sys.argv.append("--data_file")
-    sys.argv.append("cylindertest.json")
+    sys.argv.append("cube3test.json")
     sys.argv.append("--no_validation")
     # sys.argv.append("--overfit_one_batch")
     sys.argv.append("--align_2D")
