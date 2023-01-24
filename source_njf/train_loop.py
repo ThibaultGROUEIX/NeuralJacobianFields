@@ -283,7 +283,6 @@ class MyNet(pl.LightningModule):
 
         pred_V, pred_J, pred_J_restricted = self.predict_map(source, target)
 
-        # TODO: Get UV coordinates from pred_V and pass through ARAP counting loss 
         GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target)
 
         if UNIT_TEST_POISSON_SOLVE:
@@ -322,7 +321,8 @@ class MyNet(pl.LightningModule):
             "pred_V": pred_V.detach(),
             "T": source.get_source_triangles(),
             'source_ind': source.source_ind,
-            'target_inds': target.target_inds
+            'target_inds': target.target_inds,
+            "ARAP": arapenergy.detach(),
         }
 
         if self.args.test:
@@ -333,42 +333,25 @@ class MyNet(pl.LightningModule):
 
     def validation_step_end(self, batch_parts):
         self.val_step_iter += 1
-        # this next few lines make sure cupy releases all memory
-        if USE_CUPY:
-            mempool = cupy.get_default_memory_pool()
-            pinned_mempool = cupy.get_default_pinned_memory_pool()
-            mempool.free_all_blocks()
-            pinned_mempool.free_all_blocks()
-        loss = batch_parts["loss"].mean()
-        if math.isnan(loss):
-            print("loss is nan during validation!")
-        tb = self.logger.experiment
-        if self.log_validate:
-            self.log_validate = False
-            tb.add_scalar("valid loss", batch_parts["loss"].mean(), global_step=self.global_step)
-            colors = self.colors(batch_parts["source_V"].cpu().numpy(), batch_parts["T"])
-            # Replace here vertices and faces by something useful.
-
-            tb.add_mesh("valid_predicted_mesh", vertices=batch_parts["pred_V"][0:1],
-                        faces=numpy.expand_dims(batch_parts["T"], 0),
-                        global_step=self.global_step, colors=colors)
-            tb.add_mesh("valid_source_mesh", vertices=batch_parts["source_V"].unsqueeze(0),
-                        faces=numpy.expand_dims(batch_parts["T"], 0),
-                        global_step=self.global_step, colors=colors)
-            tb.add_mesh("valid_target_mesh", vertices=batch_parts["target_V"][0:1],
-                        faces=numpy.expand_dims(batch_parts["T"], 0),
-                        global_step=self.global_step, colors=colors)
-        # self.log('validation_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
+        
+        val_loss = batch_parts["val_loss"]
         if self.args.xp_type == "uv":
-            if self.val_step_iter % 100 == 0:
-                print("saving validation intermediary results.")
-                for idx in range(len(batch_parts["pred_V"])):
-                    path = Path(self.logger.log_dir) / f"valid_batchidx_{idx:04}.png"
-                    plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach(),
-                            batch_parts["pred_V"][idx].squeeze().detach(), batch_parts["T"][idx].squeeze())
+            self.log('val_loss', val_loss, logger=True, prog_bar=True, batch_size=1)
+
+            for idx in range(len(batch_parts["pred_V"])):
+                if len(batch_parts["pred_V"]) == 1: 
+                    path = os.path.join(self.logger.log_dir, f"val_{self.global_step:04}.png")                        
+                    plot_uv(path, batch_parts["pred_V"].squeeze().detach().numpy(), batch_parts["T"].squeeze(),
+                            cvals=batch_parts["ARAP"].squeeze().detach().numpy(), cvalsuff="_val")
+                else:
+                    for idx in range(len(batch_parts["pred_V"])):
+                        path = os.path.join(self.logger.log_dir, f"val_{self.global_step:04}_batch{idx:04}.png")                    
+                        plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach().numpy(), 
+                                batch_parts["T"][idx].squeeze(),
+                                cvals=batch_parts["ARAP"].squeeze().detach().numpy(), cvalsuff="_val")
 
         # self.log('valid_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
-        return loss
+        return val_loss
 
     def test_step_end(self, batch_parts):
         def screenshot(fname, V, F):
@@ -400,8 +383,7 @@ class MyNet(pl.LightningModule):
                 print("saving validation intermediary results.")
                 for idx in range(len(batch_parts["pred_V"])):
                     path = Path(self.logger.log_dir) / f"valid_batchidx_{idx:04}.png"
-                    plot_uv(path, batch_parts["target_V"][idx].squeeze().cpu().numpy(),
-                            batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(), batch_parts["T"][idx].squeeze())
+                    plot_uv(path, batch_parts["target_V"][idx].squeeze().cpu().numpy(), batch_parts["T"][idx].squeeze())
 
         # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
         MAX_SOURCES_TO_SAVE = 11000000
@@ -590,20 +572,26 @@ class MyNet(pl.LightningModule):
             # tb.add_mesh("source_samples", vertices = batch_parts["source_samples"][0].unsqueeze(0), global_step=self.global_step)
             tb.add_scalar("train loss", batch_parts["loss"].mean().item(), global_step=self.global_step)
 
-        # TODO: PLOT UV TRIANGLES WITH DISTORTION COLORS 
-        # self.log('train_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
-        if self.args.xp_type == "uv":
-            if self.global_step % 100 == 0:
-                print("saving training intermediary results.")
-                if len(batch_parts["pred_V"]) == 1: 
-                    path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}.png")                        
-                    plot_uv(path, batch_parts["pred_V"].squeeze().detach().numpy(),
-                            batch_parts["pred_V"].squeeze().detach().numpy(), batch_parts["T"].squeeze())
-                else:
-                    for idx in range(len(batch_parts["pred_V"])):
-                        path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}_batch{idx:04}.png")                    
-                        plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach().numpy(),
-                                batch_parts["pred_V"][idx].squeeze().detach().numpy(), batch_parts["T"][idx].squeeze())
+        # NOTE: Moved to evaluation step 
+        # Log evaluation data every args.eval_steps
+        # if self.args.xp_type == "uv":
+        #     if self.global_step % self.args.eval_steps == 0:
+        #         # Log performance
+        #         logvalues = {"loss": loss.item(), "ARAP": batch_parts["ARAP"].mean().item()}
+        #         self.log_dict(logvalues, logger=True, prog_bar=True, on_step=True, on_epoch=True)
+                
+        #         print("saving training intermediary results.")
+        #         if len(batch_parts["pred_V"]) == 1: 
+        #             path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}.png")                        
+        #             plot_uv(path, batch_parts["pred_V"].squeeze().detach().numpy(), batch_parts["T"].squeeze(),
+        #                     cvals=batch_parts["ARAP"].squeeze().detach().numpy())
+        #         else:
+        #             for idx in range(len(batch_parts["pred_V"])):
+        #                 path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}_batch{idx:04}.png")                    
+        #                 plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach().numpy(), 
+        #                         batch_parts["T"][idx].squeeze(),
+        #                         cvals=batch_parts["ARAP"].squeeze().detach().numpy())
+        
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx, unused=0):
@@ -741,7 +729,7 @@ def main(gen, log_dir_name, args):
     #             plugins = pl.plugins.training_type.DDPSpawnPlugin(find_unused_parameters=False)
     #
 
-    checkpoint_callback = ModelCheckpoint(every_n_train_steps=500)
+    checkpoint_callback = ModelCheckpoint(monitor="val_loss", mode="min", save_on_train_epoch_end=False)
     lr_monitor = LearningRateMonitor(logging_interval='step')
     ################################ TRAINER #############################
     trainer = pl.Trainer(accelerator=has_gpu, devices=args.n_devices, precision=args.precision, log_every_n_steps=200, 
@@ -757,7 +745,10 @@ def main(gen, log_dir_name, args):
                          strategy='ddp' if torch.cuda.is_available() else None,
                          callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
-
+    if args.overwrite == "True": 
+        from utils import clear_directory
+        clear_directory(trainer.logger.log_dir)
+        
     if trainer.precision == 16:
         use_dtype = torch.half
     elif trainer.precision == 32:
@@ -827,12 +818,11 @@ def main(gen, log_dir_name, args):
     trainer.fit(model, train_loader, valid_loader)
     
     # Generate gif of training process 
-    path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}.png")
-    if self.args.xp_type == "uv":
+    if args.xp_type == "uv":
         from PIL import Image 
         import glob 
-        fp_in = f"{self.logger.log_dir}/*.png"
-        fp_out = f"{self.logger.log_dir}/train.gif"
+        fp_in = f"{logger.log_dir}/*.png"
+        fp_out = f"{logger.log_dir}/train.gif"
         imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
         imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
                 save_all=True, duration=40, loop=0, disposal=2)

@@ -13,7 +13,6 @@ class UVExperiment(Experiment):
         # source|target=True indicates that the source will ba passed to a PointNet encoder
         encoder.add_pointnet(1000, source=True, target=False)
 
-
 if __name__ == '__main__':
     sys.argv.append("--root_dir_train")
     sys.argv.append("./data/cube3")
@@ -27,10 +26,11 @@ if __name__ == '__main__':
     sys.argv.append("--size_test")
     sys.argv.append("1")
     sys.argv.append("--epochs")
-    sys.argv.append("5000")
+    sys.argv.append("2500")
+    sys.argv.append("--val_interval")
+    sys.argv.append("0.05")
     sys.argv.append("--data_file")
     sys.argv.append("cube3test.json")
-    sys.argv.append("--no_validation")
     # sys.argv.append("--overfit_one_batch")
     sys.argv.append("--align_2D")
     sys.argv.append("--xp_type")

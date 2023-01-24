@@ -1,37 +1,49 @@
 import matplotlib.pyplot as plt
-import numpy 
-import matplotlib
+import numpy as np
 
-def plot_uv(path, gt_vertices, pred_vertices, triangles):
+def plot_uv(path, pred_vertices, triangles, gt_vertices=None, cvals=None, cmin=0, cmax=1, cvalsuff="_"):
     # setup side by side plots
-    fig, axs = plt.subplots(1,2,figsize=(15, 4))
-    fig.suptitle(str(path))
+    if gt_vertices:
+        fig, axs = plt.subplots(1,2,figsize=(15, 4))
+        fig.suptitle(str(path))
 
-    # plot GT 
-    axs[0].set_title('GT')
-    axs[0].axis('equal')
+        # plot GT 
+        axs[0].set_title('GT')
+        axs[0].axis('equal')
 
-    axs[0].triplot(gt_vertices[:,0], gt_vertices[:,1], triangles, linewidth=0.5)
+        axs[0].triplot(gt_vertices[:,0], gt_vertices[:,1], triangles, linewidth=0.5)
 
-    # plot ours 
-    axs[1].set_title('Ours')
-    axs[1].axis('equal')
-    # axs[1].set_axis_off()
+        # plot ours 
+        axs[1].set_title('Ours')
+        axs[1].axis('equal')
+        # axs[1].set_axis_off()
 
-    axs[1].triplot(pred_vertices[:,0], pred_vertices[:,1], triangles, linewidth=0.5)
-    plt.savefig(path)
-    plt.close(fig)
+        axs[1].triplot(pred_vertices[:,0], pred_vertices[:,1], triangles, linewidth=0.5)
+        plt.axis('off')
+        plt.savefig(path)
+        plt.close(fig)
+    else:
+        fig, axs = plt.subplots(figsize=(8, 4))
+        fig.suptitle(str(path))
 
-    # generate some array of length same as xy
-    # c = numpy.ones(len(gt_vertices))
-    # # create a colormap with a single color
-    # cmap = matplotlib.colors.ListedColormap('gray')
-    # # tripcolorplot with a single color filling:
-    # plt.tripcolor(gt_vertices[:, 0], gt_vertices[:, 1], triangles, c, edgecolor="k",  cmap=cmap,linewidth=0.1)
-    # plt.gca().set_aspect('equal')
-    # plt.axis('off')
-    # plt.savefig(path+'_gt.png', bbox_inches='tight',dpi=600)
-    # plt.close()
+        # plot ours 
+        axs.set_title('Ours')
+
+        axs.triplot(pred_vertices[:,0], pred_vertices[:,1], triangles, linewidth=0.5)
+        plt.axis('off')
+        plt.savefig(path)
+        plt.close(fig)
+        
+    # Plot color values if needed 
+    if cvals is not None:
+        fig, axs = plt.subplots(figsize=(8, 4))
+        fig.suptitle(f"Mean: {np.mean(cvals):0.4f}")
+        cmap = plt.get_cmap("coolwarm")
+        axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles, facecolors=cvals,  cmap=cmap,
+                      linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor="black")
+        plt.axis('off')
+        plt.savefig(path.replace(".png", f"{cvalsuff}.png"), bbox_inches='tight',dpi=600)
+        plt.close()
 
 
     # plt.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles, c, edgecolor="k",  cmap=cmap,linewidth=0.1)
