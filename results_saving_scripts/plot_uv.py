@@ -1,50 +1,63 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 
-def plot_uv(path, pred_vertices, triangles, gt_vertices=None, cvals=None, cmin=0, cmax=1, cvalsuff="_"):
+def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=0.6):
     # setup side by side plots
     if gt_vertices:
         fig, axs = plt.subplots(1,2,figsize=(15, 4))
-        fig.suptitle(str(path))
+        fig.suptitle(name)
 
-        # plot GT 
+        # plot GT
         axs[0].set_title('GT')
         axs[0].axis('equal')
 
         axs[0].triplot(gt_vertices[:,0], gt_vertices[:,1], triangles, linewidth=0.5)
 
-        # plot ours 
+        # plot ours
         axs[1].set_title('Ours')
         axs[1].axis('equal')
         # axs[1].set_axis_off()
 
         axs[1].triplot(pred_vertices[:,0], pred_vertices[:,1], triangles, linewidth=0.5)
         plt.axis('off')
-        plt.savefig(path)
+        plt.savefig(os.path.join(path, f"{name}.png"))
         plt.close(fig)
+        plt.cla()
     else:
-        fig, axs = plt.subplots(figsize=(8, 4))
-        fig.suptitle(str(path))
-
-        # plot ours 
-        axs.set_title('Ours')
-
+        fig, axs = plt.subplots(figsize=(6, 4))
+        # plot ours
+        axs.set_title(name)
         axs.triplot(pred_vertices[:,0], pred_vertices[:,1], triangles, linewidth=0.5)
         plt.axis('off')
-        plt.savefig(path)
+        plt.savefig(os.path.join(path, f"{name}.png"))
         plt.close(fig)
-        
-    # Plot color values if needed 
-    if cvals is not None:
-        fig, axs = plt.subplots(figsize=(8, 4))
-        fig.suptitle(f"Mean: {np.mean(cvals):0.4f}")
-        cmap = plt.get_cmap("coolwarm")
-        axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles, facecolors=cvals,  cmap=cmap,
-                      linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor="black")
-        plt.axis('off')
-        plt.savefig(path.replace(".png", f"{cvalsuff}.png"), bbox_inches='tight',dpi=600)
-        plt.close()
+        plt.cla()
 
+    # Plot losses
+    # TODO: Set cmin and cmax to reasonable values
+    # TODO: check how edges are set
+    if losses is not None:
+        for key, val in losses.items():
+            if "loss" in key:
+                if "edge" in key:
+                    fig, axs = plt.subplots(figsize=(6, 4))
+                    fig.suptitle(f"Mean {key}: {np.mean(val):0.4f}")
+                    cmap = plt.get_cmap("coolwarm")
+                    axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles,  cmap=cmap,
+                                linewidth=0.5, vmin=cmin, vmax=cmax, edgecolors=val)
+                    plt.axis('off')
+                    plt.savefig(os.path.join(path, f"{name}_{key}.png"), bbox_inches='tight',dpi=600)
+                    plt.close()
+                else:
+                    fig, axs = plt.subplots(figsize=(6, 4))
+                    fig.suptitle(f"Mean {key}: {np.mean(val):0.4f}")
+                    cmap = plt.get_cmap("coolwarm")
+                    axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles, facecolors=val,  cmap=cmap,
+                                linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor="black")
+                    plt.axis('off')
+                    plt.savefig(os.path.join(path, f"{name}_{key}.png"), bbox_inches='tight',dpi=600)
+                    plt.close()
 
     # plt.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles, c, edgecolor="k",  cmap=cmap,linewidth=0.1)
     # plt.gca().set_aspect('equal')

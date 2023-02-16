@@ -16,71 +16,195 @@ def get_local_tris(vertices, faces, device=torch.device("cpu")):
 
 def meshArea2D(vertices, faces, return_fareas = False):
     # Get edge vectors
-    fverts = vertices[faces] 
-    edge1 = fverts[:,1,:] - fverts[:,0,:] 
-    edge2 = fverts[:,2,:] - fverts[:,0,:]     
+    fverts = vertices[faces]
+    edge1 = fverts[:,1,:] - fverts[:,0,:]
+    edge2 = fverts[:,2,:] - fverts[:,0,:]
 
-    # Determinant definition of area 
+    # Determinant definition of area
     area = 0.5 * torch.abs(edge1[:,0] * edge2[:,1]  - edge1[:,1] * edge2[:,0])
 
-    # Debugging 
+    # Debugging
     # print(area[0])
     # print(fverts[0])
     # exit()
 
     if return_fareas == True:
-        return area 
+        return area
     else:
         return torch.sum(area)
-    
+
+# ==================== Loss Wrapper Class ===============================
+### Naming conventions
+### - "loss": will be plotted in the plot_uv function
+### - "edge": loss will be plotted over edges, else triangles
+from collections import defaultdict
+
+class UVLoss:
+    def __init__(self, args, device=torch.device("cpu")):
+        self.args = args
+        self.currentloss = defaultdict(dict)
+        self.device = device
+        self.count = 0
+
+    def clear(self):
+        self.currentloss = {}
+        self.count = 0
+
+    def computeloss(self, vertices = None, faces = None, uv = None, jacobians = None, initjacobs=None):
+        loss = 0
+        # Autocuts
+        if self.args.lossautocut:
+            acloss = autocuts(vertices, faces, jacobians, uv, self.args.seplossweight, self.args.seplossdelta)
+            loss += acloss
+            self.currentloss[self.count]['autocuts'] = acloss.detach().item()
+
+        # Distortion
+        distortionenergy = None
+        if self.args.lossdistortion == "arap":
+            local_tris = get_local_tris(vertices, faces, device=self.device)
+            fareas = meshArea2D(vertices, faces, return_fareas=True)
+            distortionenergy = arap(local_tris, faces, uv,
+                                device=self.device, renormalize=False,
+                                return_face_energy=True, timeit=False)
+            self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
+
+            if not self.args.losscount:
+                loss += torch.sum(distortionenergy)
+
+        if self.args.lossdistortion == "dirichlet":
+            distortionenergy = symmetricdirichlet(vertices, faces, uv, jacobians, init_jacob=initjacobs)
+            self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
+
+            if not self.args.losscount:
+                loss += torch.sum(distortionenergy)
+
+        if self.args.losscount and distortionenergy is not None:
+            countloss = count_loss_v2(distortionenergy, fareas, return_softloss=False, device=self.device,
+                                threshold = 1e-8)
+            self.currentloss[self.count]['countloss'] = countloss.item()
+            loss += countloss
+
+        if self.args.lossedgeseparation:
+            edgeseploss = uvseparation(vertices, faces, uv)
+            # Relaxation
+            edgeseploss = torch.sum((edgeseploss * edgeseploss)/(edgeseploss * edgeseploss + self.args.seplossdelta))
+            self.currentloss[self.count]['edgeseploss'] = edgeseploss.detach().cpu().numpy()
+            loss += self.args.seplossweight * torch.sum(edgeseploss)
+
+        self.currentloss[self.count]['total'] = loss.item()
+        self.count += 1
+
+        return loss
+
+    def exportloss(self):
+        return self.currentloss
+
 # ==================== Energies ===============================
-def symmetricdirichlet(vertices, faces, param, face_area, param_area, return_face_energy=True):
-    # Inverse equiareal term
-    inv_area_distort = 1 + face_area ** 2 / param_area ** 2
-    paramtris = param[faces]
-    ogtris = vertices[faces]
+# Autocuts energy involves weighted sum of two measures
+#   - Triangle distortion: symmetric dirichlet (sum of Fnorm of jacobian and inverse jacobian)
+#   - Edge separation: f(L1 norm between UVs of corresponding vertices) w/ f = x^2/(x^2 + delta) (delta smoothing parameter -> converge to 0 over time)
+def autocuts(vs, fs, js, uv, sepweight=1, delta=0.01, init_j=None):
+    """vs: V x 3
+       fs: F x 3
+       js: F x 3 x 2
+       uv: F x 3 x 2 """
+    dirichlet = symmetricdirichlet(vs, fs, uv, js, init_j)
 
-    # Debugging
-    # print(paramtris[:,[0,2],:])
-    # print(paramtris[:,[0,1],:])
-    # vec1 = paramtris[:,2,:] - paramtris[:,0,:]
-    # vec2 = paramtris[:,1,:] - paramtris[:,0,:]
-    # ogvec1 = ogtris[:,1,:] - ogtris[:,0,:]
-    # print(vec1[0])
-    # print(vec2[0])
-    # print(ogvec1[0])
-    # tmp = torch.sum(vec1 * vec2, dim=-1)
-    # print(tmp[0])
+    # Get vertex correspondences per edge
+    # NOTE: ordering of vertices in UV MUST BE SAME as ordering of vertices in fs
+    separation = uvseparation(vs, fs, uv)
+    separation = torch.sum((separation * separation)/(separation * separation + delta))
+    energy = dirichlet + sepweight * separation
+    return energy
 
-    dirichlet_left = (torch.norm(paramtris[:, 2, :] - paramtris[:, 0, :], dim=1) ** 2 * torch.norm(
-        ogtris[:, 1, :] - ogtris[:, 0, :], dim=1) ** 2 +
-                      torch.norm(paramtris[:, 1, :] - paramtris[:, 0, :], dim=1) ** 2 * torch.norm(
-                ogtris[:, 2, :] - ogtris[:, 0, :], dim=1) ** 2) / (4 * face_area)
-    dirichlet_right = (torch.sum((paramtris[:, 2, :] - paramtris[:, 0, :]) * (paramtris[:, 1, :] - paramtris[:, 0, :]),
-                                 dim=-1) *
-                       torch.sum((ogtris[:, 2, :] - ogtris[:, 0, :]) * (ogtris[:, 1, :] - ogtris[:, 0, :]), dim=-1)) / (
-                                  2 * face_area)
-    face_energy = inv_area_distort * (dirichlet_left - dirichlet_right)
+# TODO: batch this across multiple meshes
+# NOTE: if given an initialization jacobian, then predicted jacob must be 2x2 matrix
+def symmetricdirichlet(vs, fs, jacob=None, init_jacob=None):
 
-    if return_face_energy == False:
-        return torch.sum(face_energy)
-    return face_energy
+    # TODO: Below can be precomputed
+    # Get face areas
+    from meshing import Mesh
+    from meshing.analysis import computeFaceAreas
+    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
+    computeFaceAreas(mesh)
+    fareas = torch.from_numpy(mesh.fareas).to(vs.device)
+
+    if jacob is not None:
+        if init_jacob:
+            # Map jacob to 2x2 by multiplying against transpose
+            jacob2 = torch.matmul(init_jacob, torch.matmul(torch.transpose(jacob, 0, 1), jacob))
+        else:
+            jacob2 = torch.matmul(torch.transpose(jacob, 0, 1), jacob)
+        try:
+            invjacob = torch.linalg.inv(jacob2)
+        except Exception as e:
+            print(f"Torch inv error on jacob2: {e}")
+            invjacob = torch.linalg.pinv(jacob2)
+        energy = torch.sum(fareas * (torch.sum((jacob2 * jacob2).reshape(-1, 6), dim=-1) + torch.sum((invjacob * invjacob).reshape(-1, 6), dim=-1)))
+    else:
+        # Rederive jacobians from UV values
+        raise NotImplementedError("Symmetric dirichlet with manual jacobian calculation not implemented yet!")
+    return energy
+
+def uvseparation(vs, fs, uv):
+    from meshing import Mesh
+    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
+    fconn, vconn = mesh.topology.export_edge_face_connectivity()
+    fconn = np.array(fconn, dtype=int) # E x {f0, f1}
+    vconn = np.array(vconn, dtype=int) # E x {f0, f1} x {v0, v1}
+    ef0 = uv[(fconn[:,0], vconn[:,0])] # E x 2 x 2
+    ef1 = uv[(fconn[:,1], vconn[:,1])] # E x 2 x 2
+    separation = torch.nn.functional.l1_loss(ef0, ef1, reduction='none')
+
+    return separation
+
+# def symmetricdirichlet(vertices, faces, param, face_area, param_area, return_face_energy=True):
+#     # Inverse equiareal term
+#     inv_area_distort = 1 + face_area ** 2 / param_area ** 2
+#     paramtris = param[faces]
+#     ogtris = vertices[faces]
+
+#     # Debugging
+#     # print(paramtris[:,[0,2],:])
+#     # print(paramtris[:,[0,1],:])
+#     # vec1 = paramtris[:,2,:] - paramtris[:,0,:]
+#     # vec2 = paramtris[:,1,:] - paramtris[:,0,:]
+#     # ogvec1 = ogtris[:,1,:] - ogtris[:,0,:]
+#     # print(vec1[0])
+#     # print(vec2[0])
+#     # print(ogvec1[0])
+#     # tmp = torch.sum(vec1 * vec2, dim=-1)
+#     # print(tmp[0])
+
+#     dirichlet_left = (torch.norm(paramtris[:, 2, :] - paramtris[:, 0, :], dim=1) ** 2 * torch.norm(
+#         ogtris[:, 1, :] - ogtris[:, 0, :], dim=1) ** 2 +
+#                       torch.norm(paramtris[:, 1, :] - paramtris[:, 0, :], dim=1) ** 2 * torch.norm(
+#                 ogtris[:, 2, :] - ogtris[:, 0, :], dim=1) ** 2) / (4 * face_area)
+#     dirichlet_right = (torch.sum((paramtris[:, 2, :] - paramtris[:, 0, :]) * (paramtris[:, 1, :] - paramtris[:, 0, :]),
+#                                  dim=-1) *
+#                        torch.sum((ogtris[:, 2, :] - ogtris[:, 0, :]) * (ogtris[:, 1, :] - ogtris[:, 0, :]), dim=-1)) / (
+#                                   2 * face_area)
+#     face_energy = inv_area_distort * (dirichlet_left - dirichlet_right)
+
+#     if return_face_energy == False:
+#         return torch.sum(face_energy)
+#     return face_energy
 
 def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, renormalize=True,
          face_weights=None, normalize_filter=0, device=torch.device("cpu"), verbose=False, timeit=False, **kwargs):
     if paramtris is None:
         paramtris = param[faces]
 
-    if timeit == True: 
-        import time 
-        t0 = time.time() 
-        
+    if timeit == True:
+        import time
+        t0 = time.time()
+
     # Squared norms of difference in edge vectors multiplied by cotangent of opposite angle
     # NOTE: LSCM applies some constant scaling factor -- can we renormalize to get back original edge lengths?
     try:
         local_tris = local_tris.contiguous()
-    except Exception as e: 
-        print(e) 
+    except Exception as e:
+        print(e)
 
     e1 = local_tris[:, 2, :] - local_tris[:, 0, :]
     e2 = local_tris[:, 1, :] - local_tris[:, 0, :]
@@ -93,14 +217,14 @@ def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, reno
     cot1 = torch.abs(torch.sum(e2 * e3, dim=1) / torch.clamp((e2[:, 0] * e3[:, 1] - e2[:, 1] * e3[:, 0]), min=1e-3))
     cot2 = torch.abs(torch.sum(e1 * e3, dim=1) / torch.clamp((e1[:, 0] * e3[:, 1] - e1[:, 1] * e3[:, 0]), min=1e-3))
     cot3 = torch.abs(torch.sum(e2 * e1, dim=1) / torch.clamp(e2[:, 0] * e1[:, 1] - e2[:, 1] * e1[:, 0], min=1e-3))
-    
+
     # Debug
     if torch.any(~torch.isfinite(paramtris)):
         print(f"Non-finite parameterization result found.")
         print(f"{torch.sum(~torch.isfinite(param))} non-finite out of {len(param.flatten())} param. elements")
-        return None  
-    
-    # Threshold param tris as well 
+        return None
+
+    # Threshold param tris as well
     e1_p = torch.maximum(torch.minimum(e1_p, torch.tensor(1e5)), torch.tensor(-1e5))
     e2_p = torch.maximum(torch.minimum(e2_p, torch.tensor(1e5)), torch.tensor(-1e5))
     e3_p = torch.maximum(torch.minimum(e3_p, torch.tensor(1e5)), torch.tensor(-1e5))
@@ -202,7 +326,7 @@ def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, reno
     # print(f"e1: {e1[:2]}")
     # print(f"e2: {e2[:2]}")
     # print(f"e3: {e3[:2]}")
- 
+
     if renormalize == True:
         # ARAP-minimizing scaling of parameterization edge lengths
         num = 0
@@ -234,13 +358,13 @@ def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, reno
         e1_p_norm = ratio * e1_p
         e2_p_norm = ratio * e2_p
         e3_p_norm = ratio * e3_p
-        
-    # If any non-finite values, then return None 
+
+    # If any non-finite values, then return None
     if not torch.all(torch.isfinite(e1_p)) or not torch.all(torch.isfinite(e2_p)) or not torch.all(torch.isfinite(e3_p)) or \
         not torch.all(torch.isfinite(rot_e1)) or not torch.all(torch.isfinite(rot_e2)) or not torch.all(torch.isfinite(rot_e3)):
         print(f"ARAP: non-finite elements found")
-        return None 
-    
+        return None
+
     # Compute face-level distortions
     arap_tris = []
     for i in range(len(e1)):
@@ -263,59 +387,59 @@ def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, reno
         # exit()
     arap = torch.stack(arap_tris)
 
-    if timeit == True: 
+    if timeit == True:
         print(f"ARAP calculation: {time.time()-t0:0.5f}")
-        
+
     if return_face_energy == False:
         return torch.mean(arap)
     return arap
 
-# Smoothness term for graphcuts: basically sum pairwise energies as function of label pairs + some kind of geometry weighting 
+# Smoothness term for graphcuts: basically sum pairwise energies as function of label pairs + some kind of geometry weighting
 # pairwise: maximum cost of diverging neighbor labels (i.e. 0 next to 1). this value is multiplied by the difference in the soft probs
 def gcsmoothness(preds, mesh, feature='dihedral', pairwise=1):
     face_adj = torch.tensor([[edge.halfedge.face.index, edge.halfedge.twin.face.index] for key, edge in sorted(mesh.topology.edges.items())]).long().to(preds.device)
-    
+
     if feature == 'dihedral':
         if not hasattr(mesh, "dihedrals"):
             from models.layers.meshing.analysis import computeDihedrals
-            computeDihedrals(mesh) 
-        
+            computeDihedrals(mesh)
+
         dihedrals = torch.clip(torch.pi - torch.from_numpy(mesh.dihedrals).to(preds.device), 0, torch.pi).squeeze()
-        
-        # TODO: maybe send all dihedrals past 90* to smoothness cost 0 
+
+        # TODO: maybe send all dihedrals past 90* to smoothness cost 0
         # Maps dihedrals from 0 => infty
         # smoothness = -torch.log(dihedrals/(torch.pi - dihedrals + 1e-8) + 1e-8)
         smoothness = -torch.log(dihedrals/torch.pi + 1e-15)
     else:
         raise NotImplementedError(feature)
-    
+
     adj_preds = preds[face_adj]
-    
-    # NOTE: we include the 1 - torch.max() term in order to encourage patch GROWING 
+
+    # NOTE: we include the 1 - torch.max() term in order to encourage patch GROWING
     smoothness_cost = torch.mean(smoothness * pairwise * ((torch.abs(adj_preds[:,1] - adj_preds[:,0]))))
-        
-    return smoothness_cost 
+
+    return smoothness_cost
 
 def batchedgcsmoothness(preds, meshes, feature='dihedral', pairwise=10):
     face_adj = torch.tensor([[edge.halfedge.face.index, edge.halfedge.twin.face.index] for key, edge in sorted(mesh.topology.edges.items())]).long().to(preds.device)
-    
+
     if feature == 'dihedral':
         if not hasattr(mesh, "dihedrals"):
             from models.layers.meshing.analysis import computeDihedrals
-            computeDihedrals(mesh) 
-        
+            computeDihedrals(mesh)
+
         dihedrals = torch.clip(torch.pi - torch.from_numpy(mesh.dihedrals).to(preds.device), 0, torch.pi).squeeze()
-        
+
         # Maps dihedrals from 0 => infty
         smoothness = -torch.log(dihedrals/torch.pi + 1e-15)
     else:
         raise NotImplementedError(feature)
-    
+
     # TODO: data cost (compare preds with rounded maybe) + label cost (apply high cost to only seeing one label)
-    
+
     adj_preds = preds[face_adj]
     smoothness_cost = torch.mean(smoothness * pairwise * (torch.abs(adj_preds[:,1] - adj_preds[:,0])))
-        
+
     return smoothness_cost
 
 def arap_v2(local_tris, faces, param, return_face_energy=True, paramtris=None, renormalize=True,
@@ -323,16 +447,16 @@ def arap_v2(local_tris, faces, param, return_face_energy=True, paramtris=None, r
     if paramtris is None:
         paramtris = param[faces]
 
-    if timeit == True: 
-        import time 
-        t0 = time.time() 
-        
+    if timeit == True:
+        import time
+        t0 = time.time()
+
     # Squared norms of difference in edge vectors multiplied by cotangent of opposite angle
     # NOTE: LSCM applies some constant scaling factor -- can we renormalize to get back original edge lengths?
     try:
         local_tris = local_tris.contiguous()
-    except Exception as e: 
-        print(e) 
+    except Exception as e:
+        print(e)
 
     e1 = local_tris[:, 2, :] - local_tris[:, 0, :]
     e2 = local_tris[:, 1, :] - local_tris[:, 0, :]
@@ -350,9 +474,9 @@ def arap_v2(local_tris, faces, param, return_face_energy=True, paramtris=None, r
     if torch.any(~torch.isfinite(paramtris)):
         print(f"Non-finite parameterization result found.")
         print(f"{torch.sum(~torch.isfinite(param))} non-finite out of {len(param.flatten())} param. elements")
-        return None  
-    
-    # Threshold param tris as well 
+        return None
+
+    # Threshold param tris as well
     e1_p = torch.maximum(torch.minimum(e1_p, torch.tensor(1e5)), torch.tensor(-1e5))
     e2_p = torch.maximum(torch.minimum(e2_p, torch.tensor(1e5)), torch.tensor(-1e5))
     e3_p = torch.maximum(torch.minimum(e3_p, torch.tensor(1e5)), torch.tensor(-1e5))
@@ -362,20 +486,20 @@ def arap_v2(local_tris, faces, param, return_face_energy=True, paramtris=None, r
     e_full = torch.stack([e1, e2, e3])
     e_p_full = torch.stack([e1_p, e2_p, e3_p])
     crosscov = torch.sum(cot_full * torch.matmul(e_full.unsqueeze(3), e_p_full.unsqueeze(2)), dim=0)
-    crosscov = crosscov.reshape(crosscov.shape[0], 4) # F x 4 
-    
+    crosscov = crosscov.reshape(crosscov.shape[0], 4) # F x 4
+
     # tdenom = torch.clamp(crosscov[:,0]**2 + crosscov[:,1]**2 - crosscov[:,2]**2 - crosscov[:,3]**2, min=1e-5)
     # pdenom = torch.clamp(crosscov[:,0]**2 - crosscov[:,1]**2 + crosscov[:,2]**2 - crosscov[:,3]**2, min=1e-5)
     # theta = torch.atan2(2 * crosscov[:,0] * crosscov[:,2] + 2 * crosscov[:,1] * crosscov[:,3], tdenom)/2
     # phi = torch.atan2(2 * crosscov[:,0] * crosscov[:,1] + 2 * crosscov[:,2] * crosscov[:,3], pdenom)/2
-    
+
     # cphi = torch.cos(phi)
     # sphi = torch.sin(phi)
     # ctheta = torch.cos(theta)
     # stheta = torch.sin(theta)
-    # s1 = () * + () * 
-    # s2 = () * + () * 
-    
+    # s1 = () * + () *
+    # s2 = () * + () *
+
     # U = torch.stack([torch.stack([ctheta, -stheta], dim=1), torch.stack([stheta, ctheta], dim=1)], dim=2)
     # V = torch.stack([torch.stack([torch.cos(phi), -torch.sin(phi)], dim=1), torch.stack([torch.sin(phi), torch.cos(phi)], dim=1)], dim=2)
 
@@ -386,85 +510,85 @@ def arap_v2(local_tris, faces, param, return_face_energy=True, paramtris=None, r
 
     Q = torch.sqrt(E ** 2 + H ** 2)
     R = torch.sqrt(F ** 2 + G ** 2)
-    
+
     S1 = Q + R
     S2 = Q - R
     a1 = torch.atan2(G, torch.clamp(F, min=1e-5))
     a2 = torch.atan2(H, torch.clamp(E, min=1e-5))
     theta = (a2 - a1) / 2 # F
     phi = (a2 + a1) / 2 # F
-    
+
     # F x 2 x 2
     U = torch.stack([torch.stack([torch.cos(phi), -torch.sin(phi)], dim=1), torch.stack([torch.sin(phi), torch.cos(phi)], dim=1)], dim=2)
-    
+
     # F x 2 x 2
     V = torch.stack([torch.stack([torch.cos(theta), -torch.sin(theta)], dim=1), torch.stack([torch.sin(theta), torch.cos(theta)], dim=1)], dim=2)
 
-    R = torch.matmul(V, U).to(device) # F x 2 x 2 
+    R = torch.matmul(V, U).to(device) # F x 2 x 2
     baddet = torch.where(torch.det(R) <= 0)[0]
-    if len(baddet) > 0: 
-        U[baddet, 1, :] *= -1 
+    if len(baddet) > 0:
+        U[baddet, 1, :] *= -1
         R = torch.matmul(V, U).to(device)
 
     edge_tmp = torch.stack([e1, e2, e3], dim=2)
     rot_edges = torch.matmul(R, edge_tmp) # F x 2 x 3
-    rot_e_full = rot_edges.permute(2, 0, 1) # 3 x F x 2 
-    cot_full = cot_full.reshape(cot_full.shape[0], cot_full.shape[1]) # 3 x F 
+    rot_e_full = rot_edges.permute(2, 0, 1) # 3 x F x 2
+    cot_full = cot_full.reshape(cot_full.shape[0], cot_full.shape[1]) # 3 x F
     if renormalize == True:
         # ARAP-minimizing scaling of parameterization edge lengths
-        if face_weights is not None: 
+        if face_weights is not None:
             keepfs = torch.where(face_weights > normalize_filter)[0]
         else:
             keepfs = torch.arange(rot_e_full.shape[1])
-        
+
         num = torch.sum(cot_full[:,keepfs] * torch.sum(rot_e_full[:,keepfs,:] * e_p_full[:,keepfs,:], dim = 2))
         denom = torch.sum(cot_full[:,keepfs] * torch.sum(e_p_full[:,keepfs,:] * e_p_full[:,keepfs,:], dim = 2))
-            
+
         ratio = max(num / denom, 1e-5)
         if verbose == True:
             print(f"Scaling param. edges by ARAP-minimizing scalar: {ratio}")
-    
+
         e_p_full *= ratio
-    
-    # If any non-finite values, then return None 
+
+    # If any non-finite values, then return None
     if not torch.all(torch.isfinite(e_p_full)) or not torch.all(torch.isfinite(rot_e_full)):
         print(f"ARAP: non-finite elements found")
-        return None 
-    
+        return None
+
     # Compute face-level distortions
     arap_tris = torch.sum(cot_full * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0)
-    if timeit == True: 
+    if timeit == True:
         print(f"ARAP calculation: {time.time()-t0:0.5f}")
-    
-    # Debugging: show rotated edges along with parameterization 
-    # import polyscope as ps 
-    # ps.init() 
-    # f1 = faces[0] 
-    # param_f1 = param[f1] 
+
+    # Debugging: show rotated edges along with parameterization
+    # import polyscope as ps
+    # ps.init()
+    # f1 = faces[0]
+    # param_f1 = param[f1]
     # # Normalize the param so first vertex is at 0,0
     # param_f1 = param_f1 - param_f1[0]
     # og_f1 = local_tris[0] # 3 x 2
-    # rot_f1 = R[0] 
+    # rot_f1 = R[0]
     # new_f1 = torch.matmul(rot_f1, og_f1.transpose(1,0)).transpose(1,0)
     # print(new_f1)
-    # og_curve = ps.register_curve_network("og triangle", og_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,1,0])  
-    # param_curve = ps.register_curve_network("UV", param_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,0,1])  
-    # rot_curve = ps.register_curve_network("rot triangle", new_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[1,0,0])  
+    # og_curve = ps.register_curve_network("og triangle", og_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,1,0])
+    # param_curve = ps.register_curve_network("UV", param_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,0,1])
+    # rot_curve = ps.register_curve_network("rot triangle", new_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[1,0,0])
     # ps.show()
-    
-    # # Compute energies 
+
+    # # Compute energies
     # print(e_p_full.shape)
     # print(e_full.shape)
     # print(arap_tris[0])
     # print(torch.sum(cot_full[:,0] * torch.linalg.norm(e_p_full[:,0,:] - e_full[:,0,:], dim=1) ** 2))
-    
-    # raise 
-    
+
+    # raise
+
     if return_face_energy == False:
         return torch.mean(arap_tris)
-    
+
     return arap_tris
-                                 
+
 # ==================== Loss Functions ===============================
 # OG Counting Loss
 def count_loss(face_errors, fareas, threshold=0.1, alpha=5, debug=False,
@@ -484,7 +608,7 @@ def count_loss(face_errors, fareas, threshold=0.1, alpha=5, debug=False,
         return count_loss, softloss
     return count_loss
 
-# Count loss with critical point at the threshold 
+# Count loss with critical point at the threshold
 def count_loss_v2(face_errors, fareas, threshold=0.1, alpha=5, debug=False,
                return_softloss=True, device=torch.device("cpu"), **kwargs):
     # Normalize face error by parea
@@ -647,7 +771,7 @@ def compute_pr_auc(labels, preds):
 def auc(labels, preds):
     from sklearn.metrics import roc_auc_score
     auc_score = roc_auc_score(labels, preds)
-    return auc_score 
+    return auc_score
 
 def mAP(labels, preds, multi=False):
     from sklearn.metrics import average_precision_score

@@ -143,7 +143,7 @@ class PoissonSystemMatrices:
         self.__F = F
         self.cpuonly = cpuonly
         self.cpu_splu = None
-    
+
 
     def create_poisson_solver(self):
         return PoissonSolver(self.igl_grad,self.w,self.rhs, None, self.lap)
@@ -160,7 +160,7 @@ class PoissonSystemMatrices:
                     lap = self.lap
                     # my_splu = scipy_splu(self.lap)
                     # my_splu = MyCuSPLU_CPU(lap_L, lap_U, lap_perm_c, lap_perm_r)
-                else: 
+                else:
                     my_splu = MyCuSPLU_CPU(lap_L, lap_U, lap_perm_c, lap_perm_r)
                 # st = time.time()
                 # my_splu = scipy_splu(lap_L@lap_U)
@@ -171,7 +171,7 @@ class PoissonSystemMatrices:
                 my_splu = scipy_splu(self.lap)
             else:
                 0/0
-                # my_splu = splu(lap_L) 
+                # my_splu = splu(lap_L)
 
         return PoissonSolver(self.igl_grad,w,self.rhs,my_splu, lap)
 
@@ -186,7 +186,7 @@ class PoissonSystemMatrices:
             self.lap = igl.cotmatrix(self.__V,self.__F)
             self.lap = self.lap[1:, 1:]
             self.lap = SparseMat.from_coo(self.lap.tocoo(), torch.float64)
-        
+
         if isinstance(self.lap,PoissonSystemMatrices) and self.lap.vals.shape[0] == self.__V.shape[0]:
             assert(False), "this should not happen, the fix is to remove a column and row of the laplacian"
             self.lap = self.lap[1:, 1:]
@@ -325,11 +325,11 @@ class PoissonSolver:
     def restricted_jacobians_from_vertices(self,V):
         return self.restrict_jacobians(self.jacobians_from_vertices(V))
 
-    def solve_poisson(self,jacobians): 
+    def solve_poisson(self,jacobians):
         # st = time.time()
         assert(len(jacobians.shape) == 4)
         assert(jacobians.shape[2] == 3 and jacobians.shape[3] == 3)
-       
+
         # torch.cuda.synchronize()
         # st = time.time()
 
@@ -409,10 +409,10 @@ def poisson_system_matrices_from_mesh( V,F, dim=3,ttype = torch.float64, is_spar
 
 
     grad = SparseMat.from_M(_convert_sparse_igl_grad_to_our_convention(grad), torch.float64)
-    poissonbuilder =  PoissonSystemMatrices(V=V,F=F,grad=grad, 
+    poissonbuilder =  PoissonSystemMatrices(V=V,F=F,grad=grad,
               rhs=SparseMat.from_coo(rhs, torch.float64), w=w,
-              ttype=ttype,is_sparse=is_sparse, 
-              lap=SparseMat.from_coo(laplace, torch.float64), 
+              ttype=ttype,is_sparse=is_sparse,
+              lap=SparseMat.from_coo(laplace, torch.float64),
               cpuonly=cpuonly)
     # poissonbuilder.get_new_grad()
     return poissonbuilder
@@ -481,7 +481,7 @@ class SPLUSolveLayer(torch.autograd.Function):
             mempool.free_all_blocks()
             pinned_mempool.free_all_blocks()
             del ctx.lu
-        
+
         return None, grad
 
     @staticmethod

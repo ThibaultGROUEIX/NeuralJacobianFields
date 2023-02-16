@@ -31,8 +31,10 @@ def get_arg_parser():
 	parser.add_argument("--val_interval",help = "validation interval",default=0.05,type=float)
 	parser.add_argument("--epochs",help = "number of training epochs",default=2000,type=int)
 
+	parser.add_argument("--tutteinit", help="predict 2D rotations of tutte embedding", action="store_true")
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
 						action="store_true")
+	parser.add_argument("--no_poisson", help="no poisson solve", action="store_true")
 	parser.add_argument("--no_jacobian_loss", help="use source/target jacobian l2 loss", action="store_true")
 	parser.add_argument("--targets_per_batch",
 						help=f"maximal number of target deformations per batch, default is 16",type=int,default=1)
@@ -63,7 +65,14 @@ def get_arg_parser():
 	parser.add_argument("--normalize_jac_loss", help="normalize jacobians 1/norm(GT) when comparing them, default is false",action="store_true")
 	parser.add_argument("--precision",help ="the precision we work in, should be 16,32,or 64 (default)",default=64,type=int)
 	parser.add_argument("--vertex_loss_weight", help="the weight to place on the vertex loss (jacobian loss is unweighted) default = 1.0", default=1.0, type=float)
-	parser.add_argument("--losstype",help ="whether to use counting-based loss or distortion-based loss",default="count",choices={'count', "distortion"})
+
+	###### LOSSES ######
+	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet'})
+	parser.add_argument("--losscount", help = "use counting loss over distortion energy", action="store_true")
+	parser.add_argument("--lossedgeseparation", help = "use edge separation loss", action="store_true")
+	parser.add_argument("--seplossdelta", help="delta for edge separation loss", default=0.5, type=float)
+	parser.add_argument("--seplossweight", help="weight for the separation loss", default=1, type=float)
+
 	parser.add_argument("--gpu_strategy",help ="default: no op (whatever lightning does by default). ddp: use the ddp multigpu startegy; spawn: use the ddpspawn strategy",default=None,choices={'ddp','ddpspawn', 'cpuonly'})
 	parser.add_argument("--no_validation",help = "skip validation",action="store_true")
 	parser.add_argument("--n_gpu", help="num of gpus, default is all", type=int, default=-1)
@@ -82,7 +91,7 @@ def get_arg_parser():
 	parser.add_argument('--random_centering',help="random centering of train samples",action='store_true')
 	parser.add_argument('--deterministic',help="sets deterministic == true in the trainer. Some operations will be slower on the GPU",action='store_true')
 
-	
+
 	parser.add_argument('--compute_human_data_on_the_fly',help="computes human data on the fly",action='store_true')
 	parser.add_argument('--dataset_fail_safe',help="returns first pairs in the dataset if it encounters a data issue",action='store_true')
 	parser.add_argument('--size_train',help="size_train_dataset",type=int, default=1000)
@@ -93,7 +102,7 @@ def get_arg_parser():
 	parser.add_argument('--accumulate_grad_batches', type=int,help="store_faces_for_each samples individually",default=1)
 	parser.add_argument('--shuffle_triangles',type=bool,help="Shuffle triangles before NJF decoder, to avoid that group-norm overfits to a particular triangulation.",default=1)
 
-	## DEBUGGING 
+	## DEBUGGING
 	parser.add_argument('--debug', action='store_true')
 	parser.add_argument('--overwrite', action='store_true')
 

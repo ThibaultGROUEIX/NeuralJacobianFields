@@ -8,6 +8,9 @@
 lightning_logs
 *results/
 *data/
+*.polyscope*
+*.png
+*.ini
 
 # data files
 MeshCNN/checkpoints

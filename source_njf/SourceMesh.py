@@ -66,6 +66,7 @@ class SourceMesh:
             self.__loaded_data[key] = self.__loaded_data[key].to(device)
         return self
 
+    ### PRECOMPUTATION HAPPENS HERE ###
     def __init_from_mesh_data(self):
         assert self.mesh_processor is not None
         self.mesh_processor.prepare_differential_operators_for_use(self.__ttype) #call 1
@@ -102,6 +103,19 @@ class SourceMesh:
             self.__source_global_translation_to_original = c
         self.poisson = self.mesh_processor.diff_ops.poisson_solver
 
+        # Precompute Tutte if set
+        if self.args.tutteinit:
+            from utils import tutte_embedding
+
+            self.tutteuv = torch.from_numpy(tutte_embedding(self.source_vertices.detach().cpu().numpy(),
+                                                            self.get_source_triangles().detach().cpu().numpy(), fixclosed=True))
+
+            # Get Jacobians
+            self.tuttej = self.jacobians_from_vertices(self.tutteuv) # F x 3 x 3
+
+            ## Store in loaded data so it gets mapped to device
+            self.__loaded_data['tutteuv'] = self.tutteuv
+            self.__loaded_data['tuttej'] = self.tuttej
 
         # Essentially here we load pointnet data and apply the same preprocessing
         for key in self.__extra_keys:
@@ -115,7 +129,7 @@ class SourceMesh:
                 scale = self.__random_scale
                 data *= scale
             data = data.unsqueeze(0).type(self.__ttype)
-            
+
             self.__loaded_data[key] = data
         # print("Ellapsed load source mesh ", time.time() - start)
 
@@ -146,5 +160,3 @@ class SourceMesh:
         # for key in self.__loaded_data.keys():
         #     self.__loaded_data[key].pin_memory()
         return self
-
-

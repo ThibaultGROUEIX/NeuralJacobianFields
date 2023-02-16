@@ -8,7 +8,7 @@ import numpy.random
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import DeformationEncoder
-import SourceToTargetsFile
+from losses import UVLoss
 from results_saving_scripts import save_mesh_with_uv
 from DeformationDataset import DeformationDataset
 from torch.utils.data import DataLoader
@@ -23,7 +23,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks import LearningRateMonitor
 
 USE_CUPY = False
-has_gpu = "cpu" 
+has_gpu = "cpu"
 if USE_CUPY and torch.cuda.is_available():
     import cupy
     has_gpu="gpu"
@@ -48,6 +48,7 @@ class MyNet(pl.LightningModule):
         print(f"********** centroid dim: {point_dim}")
         super().__init__()
         self.args = args
+        self.lossfcn = UVLoss(args, self.device)
 
         layer_normalization = self.get_layer_normalization_type()
         if layer_normalization == "IDENTITY":
@@ -132,7 +133,7 @@ class MyNet(pl.LightningModule):
         if self.__IDENTITY_INIT:
             self.per_face_decoder._modules["12"].bias.data.zero_()
             self.per_face_decoder._modules["12"].weight.data.zero_()
-        
+
         self.__global_trans = False
         if self.__global_trans:
             self.global_decoder = nn.Sequential(nn.Linear(code_dim, 128),
@@ -144,7 +145,7 @@ class MyNet(pl.LightningModule):
                                                 nn.Linear(64, 64),
                                                 nn.ReLU(),
                                                 nn.Linear(64, 9))
-        
+
         self.encoder = encoder
         self.point_dim = point_dim
         self.code_dim = code_dim
@@ -170,7 +171,7 @@ class MyNet(pl.LightningModule):
             x = x[:, :self.code_dim + self.point_dim]
 
         return self.per_face_decoder(x.type(self.per_face_decoder[0].bias.type()))
-    
+
     def predict_jacobians(self, source, target):
         '''
 		given a batch class, predict jacobians
@@ -252,14 +253,13 @@ class MyNet(pl.LightningModule):
         GT_J_restricted = source.restrict_jacobians(GT_J)
         return GT_V, GT_J, GT_J_restricted
 
-    def predict_map(self, source, target):
+    def predict_map(self, source, target, initj=None):
         pred_J = self.predict_jacobians(source, target)
         if self.args.align_2D:  # if the target is in 2D the last column of J is 0
-            pred_J[:, :,2] = 0  # TODO this line is sus, shouldn't it be pred_J[:,:,2,:], and in any case this hould happen w.r.t. restricted jacobians!!!!
-            
-        # TODO: debug this -- check shape of pred_V and what happens when align_2D is turned on? 
-        pred_V = source.vertices_from_jacobians(pred_J)
-        pred_J_restricted = source.restrict_jacobians(pred_J) # Should'nt this line come before?
+            pred_J[:, :,2] = 0
+
+        pred_V = source.vertices_from_jacobians(pred_J, initj=initj)
+        pred_J_restricted = source.restrict_jacobians(pred_J)
         return pred_V, pred_J, pred_J_restricted
 
     def check_map(self, source, target, GT_J, GT_V):
@@ -272,16 +272,40 @@ class MyNet(pl.LightningModule):
 
     ### TRAINING STEP HERE ###
     def my_step(self, source_batch, batch_idx, test=False):
-        vertex_loss = torch.tensor(0.0, device=self.device)
-        jacobian_loss = torch.tensor(0.0, device=self.device)
-
         # sanity checking the poisson solve, getting back GT vertices from GT jacobians. This is not used in this training.
         # GTT = batches.get_batch(0).poisson.jacobians_from_vertices(pred_V[0])
         # 		GT_V = batches.get_batch(0).poisson.solve_poisson(GTT)
+
+        # TODO: include in source batch the precomputed Jacobian of Tutte embeddings
         source = source_batch[0]
         target = source_batch[1]
+        if self.args.tutteinit:
+            tuttej = source.tuttej
 
-        pred_V, pred_J, pred_J_restricted = self.predict_map(source, target)
+        vertices = source.get_vertices()
+        faces = torch.from_numpy(source.get_source_triangles()).long().to(self.device)
+
+        # TODO: CHECK THESE TENSORS
+        if self.args.no_poisson:
+            pred_J = self.predict_jacobians(source, target)
+            pred_J_restricted = self.restrict_jacobians(pred_J)
+
+            # Compute the UV map by dropping last dimension of predJ and multiplying against the face matrices
+            fverts = vertices[faces] # B x F x 3 x 3
+            if self.args.tutteinit:
+                pred_V = torch.einsum("abcd,abce,abej->abcj", (fverts, tuttej, pred_J[:,:2,:2])) # B x F x 3 x 2
+            else:
+                pred_V = torch.einsum("abcd,abde->abce", (fverts, pred_J[:,:,:2])) # B x F x 3 x 2
+
+            # Center
+            pred_V = pred_V - torch.mean(pred_V, dim=2, keepdim=True)
+        else:
+            pred_V, pred_J, pred_J_restricted = self.predict_map(source, target, initj=tuttej if self.args.tutteinit else None)
+
+        # TODO: check that shape of J is correct!
+        # Drop last dimension of restricted J
+        if pred_J_restricted.shape[3] == 3:
+            pred_J_restricted = pred_J_restricted[:,:,:2]
 
         GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target)
 
@@ -290,65 +314,42 @@ class MyNet(pl.LightningModule):
             print(self.check_map(source, target, GT_J, GT_V))
             assert(success), f"UNIT_TEST_POISSON_SOLVE FAILED!! {self.check_map(source, target, GT_J, GT_V)}"
 
-        # Compute losses 
-        from losses import arap, count_loss_v2, get_local_tris, meshArea2D
-        vertices = source.get_vertices() 
-        faces = torch.from_numpy(source.get_source_triangles()).long()
-        local_tris = get_local_tris(vertices, faces, device=self.device)
-        pred_UV = pred_V[0,:,:2]
-        # Compute face areas for counting loss 
-        # TODO: BATCH BELOW 
-        fareas = meshArea2D(vertices, faces, return_fareas=True)
-        arapenergy = arap(local_tris, faces, pred_UV,
-                            device=self.device, renormalize=False,
-                            return_face_energy=True, timeit=False)
-        if self.args.losstype == "count":
-            loss = count_loss_v2(arapenergy, fareas, return_softloss=False, device=self.device, 
-                                    threshold = 1e-8)
-        elif self.args.losstype == "distortion":
-            loss = torch.sum(arapenergy)
+        # Compute losses
+        # TODO: make below batched
+        loss = self.lossfcn.computeloss(vertices, faces, pred_V[0,:,:2], pred_J_restricted, tuttej if self.args.tutteinit else None)
+        lossrecord = self.lossfcn.exportloss()
 
         loss = loss.type_as(GT_V)
-        val_loss = loss
         if self.verbose:
             print(
                 f"batch of {target.get_vertices().shape[0]:d} source <--> target pairs, each mesh {target.get_vertices().shape[1]:d} vertices, {source.get_source_triangles().shape[1]:d} faces")
         ret = {
             "target_V": target.get_vertices().detach(),
             "source_V": source.get_vertices().detach(),
-            "loss": loss,
-            "val_loss": val_loss,
             "pred_V": pred_V.detach(),
             "T": source.get_source_triangles(),
             'source_ind': source.source_ind,
             'target_inds': target.target_inds,
-            "ARAP": arapenergy.detach(),
+            "loss": lossrecord
         }
 
         if self.args.test:
             ret['pred_J_R'] = pred_J_restricted.detach()
             ret['target_J_R'] = GT_J_restricted.detach()
-            
+
         return ret
 
     def validation_step_end(self, batch_parts):
         self.val_step_iter += 1
-        
-        val_loss = batch_parts["val_loss"]
+
+        val_loss = batch_parts["loss"]['total']
         if self.args.xp_type == "uv":
             self.log('val_loss', val_loss, logger=True, prog_bar=True, batch_size=1)
 
+            lossdict = batch_parts['loss']
             for idx in range(len(batch_parts["pred_V"])):
-                if len(batch_parts["pred_V"]) == 1: 
-                    path = os.path.join(self.logger.log_dir, f"val_{self.global_step:04}.png")                        
-                    plot_uv(path, batch_parts["pred_V"].squeeze().detach().numpy(), batch_parts["T"].squeeze(),
-                            cvals=batch_parts["ARAP"].squeeze().detach().numpy(), cvalsuff="_val")
-                else:
-                    for idx in range(len(batch_parts["pred_V"])):
-                        path = os.path.join(self.logger.log_dir, f"val_{self.global_step:04}_batch{idx:04}.png")                    
-                        plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach().numpy(), 
-                                batch_parts["T"][idx].squeeze(),
-                                cvals=batch_parts["ARAP"].squeeze().detach().numpy(), cvalsuff="_val")
+                plot_uv(self.logger.log_dir, f"uv_{self.global_step:04}_b{idx:04}.png", batch_parts["pred_V"][idx].squeeze().detach().numpy(),
+                        batch_parts["T"][idx].squeeze(), losses=lossdict[idx])
 
         # self.log('valid_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
         return val_loss
@@ -554,7 +555,8 @@ class MyNet(pl.LightningModule):
         # torch.cuda.synchronize()
         # This is called after each training_step, and stores the output of training_step in a list. This list can be longuer than 1 if training is distributed on multiple GPUs
         # this next few lines make sure cupy releases all memory
-        loss = batch_parts["loss"].mean()
+        loss = batch_parts["loss"]['total']
+
         if self.global_step % FREQUENCY == 0:  # skipping for now AttributeError: 'MyNet' object has no attribute 'colors'
             # TODO: HOW TO GET THIS TO SHOW CORRECTLY ON TENSORBOARD??
             tb = self.logger.experiment
@@ -570,28 +572,8 @@ class MyNet(pl.LightningModule):
                         faces=numpy.expand_dims(batch_parts["T"], 0),
                         global_step=self.global_step, colors=colors)
             # tb.add_mesh("source_samples", vertices = batch_parts["source_samples"][0].unsqueeze(0), global_step=self.global_step)
-            tb.add_scalar("train loss", batch_parts["loss"].mean().item(), global_step=self.global_step)
+            tb.add_scalar("train loss", batch_parts["loss"]['total'], global_step=self.global_step)
 
-        # NOTE: Moved to evaluation step 
-        # Log evaluation data every args.eval_steps
-        # if self.args.xp_type == "uv":
-        #     if self.global_step % self.args.eval_steps == 0:
-        #         # Log performance
-        #         logvalues = {"loss": loss.item(), "ARAP": batch_parts["ARAP"].mean().item()}
-        #         self.log_dict(logvalues, logger=True, prog_bar=True, on_step=True, on_epoch=True)
-                
-        #         print("saving training intermediary results.")
-        #         if len(batch_parts["pred_V"]) == 1: 
-        #             path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}.png")                        
-        #             plot_uv(path, batch_parts["pred_V"].squeeze().detach().numpy(), batch_parts["T"].squeeze(),
-        #                     cvals=batch_parts["ARAP"].squeeze().detach().numpy())
-        #         else:
-        #             for idx in range(len(batch_parts["pred_V"])):
-        #                 path = os.path.join(self.logger.log_dir, f"train_{self.global_step:04}_batch{idx:04}.png")                    
-        #                 plot_uv(path, batch_parts["pred_V"][idx].squeeze().detach().numpy(), 
-        #                         batch_parts["T"][idx].squeeze(),
-        #                         cvals=batch_parts["ARAP"].squeeze().detach().numpy())
-        
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx, unused=0):
@@ -701,7 +683,7 @@ def main(gen, log_dir_name, args):
             if args.test_set == 'all':
                 print('++++++++++++++++++++++ TESTING ON ENTIRE DATASET +++++++++++++++++++++++')
                 train_pairs = pairs_train
-                
+
     else:
         ### DEFAULT GOES HERE ###
         if not args.compute_human_data_on_the_fly:
@@ -732,7 +714,7 @@ def main(gen, log_dir_name, args):
     checkpoint_callback = ModelCheckpoint(monitor="val_loss", mode="min", save_on_train_epoch_end=False)
     lr_monitor = LearningRateMonitor(logging_interval='step')
     ################################ TRAINER #############################
-    trainer = pl.Trainer(accelerator=has_gpu, devices=args.n_devices, precision=args.precision, log_every_n_steps=200, 
+    trainer = pl.Trainer(accelerator=has_gpu, devices=args.n_devices, precision=args.precision, log_every_n_steps=200,
                          max_epochs=args.epochs, sync_batchnorm=args.n_devices != 1,
                          val_check_interval=(1.0 if args.no_validation else args.val_interval), logger=logger,
                          plugins=None,
@@ -745,10 +727,10 @@ def main(gen, log_dir_name, args):
                          strategy='ddp' if torch.cuda.is_available() else None,
                          callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
-    if args.overwrite == "True": 
+    if args.overwrite == "True":
         from utils import clear_directory
         clear_directory(trainer.logger.log_dir)
-        
+
     if trainer.precision == 16:
         use_dtype = torch.half
     elif trainer.precision == 32:
@@ -764,7 +746,7 @@ def main(gen, log_dir_name, args):
     print(len(train_dataset))
     train_loader = DataLoader(train_dataset, batch_size=1, collate_fn=custom_collate, pin_memory = (args.unpin_memory is None),
                               shuffle=(args.test is None), num_workers=args.workers, persistent_workers=args.workers > 0)
-    
+
     if args.no_validation or args.test:
         valid_loader = None
     else:
@@ -816,11 +798,11 @@ def main(gen, log_dir_name, args):
 
     print(len(train_loader))
     trainer.fit(model, train_loader, valid_loader)
-    
-    # Generate gif of training process 
+
+    # Generate gif of training process
     if args.xp_type == "uv":
-        from PIL import Image 
-        import glob 
+        from PIL import Image
+        import glob
         fp_in = f"{logger.log_dir}/*.png"
         fp_out = f"{logger.log_dir}/train.gif"
         imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
