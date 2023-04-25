@@ -286,38 +286,55 @@ class Topology():
             v2 = edge.halfedge.twin.vertex
             conn.append([v1.index, v2.index])
         return conn
-    
-    def export_edge_face_connectivity(self):
-        # fconn: E x 2 indexed by neighboring faces 
+
+    def export_edge_face_connectivity(self, fs):
+        # fconn: E x 2 indexed by neighboring faces
         # vconn: E x 2 x 2 indexed by local vertex indices of neighboring indices ([v0, v1, v0', v1'])
+        # NOTE: we have to take faces as input because topology face to vertex ordering is arbitrary
         fconn = []
         vconn = []
         for _, edge in sorted(self.edges.items()):
             if edge.halfedge is None:
                 continue
+
+            # Don't count edges on a boundary
+            if edge.onBoundary():
+                continue
+
             fconn.append([edge.halfedge.face.index, edge.halfedge.twin.face.index])
-            
+
             # Find vertex indices corresponding to each face
-            ev0 = [-1, -1] 
-            ev1 = [-1, -1] 
-            count = 0 
-            v0 = edge.halfedge.vertex 
-            v1 = edge.halfedge.twin.vertex 
-            for v in edge.halfedge.face.adjacentVertices(): 
-                if v == v0: 
-                    ev0[0] = count 
-                elif v == v1: 
-                    ev0[1] = count 
+            ev0 = np.array([-1, -1])
+            ev1 = np.array([-1, -1])
+            count = 0
+            v0 = edge.halfedge.vertex.index
+            v1 = edge.halfedge.twin.vertex.index
+            f0 = edge.halfedge.face.index
+            for v in fs[f0]:
+                if v == v0:
+                    ev0[0] = count
+                elif v == v1:
+                    ev0[1] = count
+                if np.all(ev0 >= 0):
+                    break
                 count += 1
-            count = 0 
-            for v in edge.halfedge.twin.face.adjacentVertices():
-                if v == v0: 
-                    ev1[0] = count 
-                elif v == v1: 
-                    ev1[1] = count 
+
+
+            count = 0
+            f1 = edge.halfedge.twin.face.index
+            for v in fs[f1]:
+                if v == v0:
+                    ev1[0] = count
+                elif v == v1:
+                    ev1[1] = count
+                if np.all(ev1 >= 0):
+                    break
                 count += 1
-            assert np.all(ev0 >= 0), f"Face {edge.halfedge.face.index} missing corresponding vertex for edge {edge.index}"
-            assert np.all(ev1 >= 0), f"Face {edge.halfedge.twin.face.index} missing corresponding vertex for edge {edge.index}"
+            assert np.all(np.array(ev0) >= 0), f"Face {edge.halfedge.face.index} missing corresponding vertex for edge {edge.index}"
+            assert np.all(np.array(ev1) >= 0), f"Face {edge.halfedge.twin.face.index} missing corresponding vertex for edge {edge.index}"
+            assert np.all(np.array(ev0) <= 2), f"Face {edge.halfedge.face.index} invalid correspondence vertices {ev0}"
+            assert np.all(np.array(ev1) <= 2), f"Face {edge.halfedge.twin.face.index} invalid correspondence vertices {ev1}"
+
             vconn.append([ev0, ev1])
         return fconn, vconn
 
@@ -357,14 +374,14 @@ class Topology():
             for v in b.adjacentVertices():
                 adjacentFaces[v] += 1
 
-        self.nonmanifvs = [] 
+        self.nonmanifvs = []
         for v in self.vertices.values():
             if adjacentFaces[v] != v.degree():
                 self.nonmanifvs.append(v.index)
 
-        if len(self.nonmanifvs) > 0: 
+        if len(self.nonmanifvs) > 0:
             return True
-        
+
         del adjacentFaces
         return False
 
@@ -379,12 +396,12 @@ class Topology():
 
     def computeNonManifoldEdges(self):
         edgeCounts = defaultdict(int)
-        nonmanifcount = 0 
+        nonmanifcount = 0
         for he in self.halfedges.values():
             edgeCounts[he.edge] += 1
             if edgeCounts[he.edge] > 2:
                 nonmanifcount += 1
-        return nonmanifcount 
+        return nonmanifcount
 
     def thorough_check(self):
         # a halfedge has v, e, f, prev, next, twin, onBoundary

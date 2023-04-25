@@ -8,19 +8,25 @@ import numpy.random
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import DeformationEncoder
-from losses import UVLoss
+from losses import UVLoss, symmetricdirichlet
 from results_saving_scripts import save_mesh_with_uv
 from DeformationDataset import DeformationDataset
 from torch.utils.data import DataLoader
 from torch import nn
 import torch
 import PerCentroidBatchMaker
-import time
+from utils import stitchtopology
+import MeshProcessor
 
 import pytorch_lightning as pl
-from lightning_lite.utilities.seed import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks import LearningRateMonitor
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.plugins.environments import SLURMEnvironment
+from signal import SIGUSR1
+
+from meshing.mesh import Mesh
+from meshing.analysis import computeFacetoEdges
 
 USE_CUPY = False
 has_gpu = "cpu"
@@ -30,13 +36,13 @@ if USE_CUPY and torch.cuda.is_available():
 
 import math
 from pytorch_lightning.loggers import TensorBoardLogger
-from results_saving_scripts.plot_uv import plot_uv
+from results_saving_scripts.plot_uv import plot_uv, export_views
 from pathlib import Path
 from results_saving_scripts import paper_stats
 import json
 
-FREQUENCY = 100 # frequency of logguing - every FREQUENCY iteration step
-UNIT_TEST_POISSON_SOLVE = False
+FREQUENCY = 10 # frequency of logguing - every FREQUENCY iteration step
+UNIT_TEST_POISSON_SOLVE = True
 
 class MyNet(pl.LightningModule):
     '''
@@ -50,6 +56,7 @@ class MyNet(pl.LightningModule):
         self.args = args
         self.lossfcn = UVLoss(args, self.device)
 
+        # NOTE: code dim refers to the pointnet encoding. Point_dim is centroid position (also potentially fourier features)
         layer_normalization = self.get_layer_normalization_type()
         if layer_normalization == "IDENTITY":
             # print("Using IDENTITY (no normalization) in per_face_decoder!")
@@ -126,15 +133,27 @@ class MyNet(pl.LightningModule):
                                                   nn.LayerNorm(normalized_shape=128),
                                                   nn.ReLU(),
                                                   nn.Linear(128, 9))
+        elif layer_normalization == "FLATTEN":
+            print("==== We are predicting FLAT vectors! ==== ")
+            # NOTE: In this case we can initialize random vector input of SAME channels and keep channels constant throughout
+            channels = point_dim + code_dim
+            self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, channels),
+                                                    nn.GroupNorm(num_groups=9, num_channels=channels),
+                                                    nn.ReLU(),
+                                                    nn.Linear(channels, channels),
+                                                    nn.GroupNorm(num_groups=9, num_channels=channels),
+                                                    nn.ReLU(),
+                                                    nn.Linear(channels, channels),
+                                                    )
         else:
             raise Exception("unknown normalization method")
 
-        self.__IDENTITY_INIT = True
+        self.__IDENTITY_INIT = self.args.identity
         if self.__IDENTITY_INIT:
-            self.per_face_decoder._modules["12"].bias.data.zero_()
-            self.per_face_decoder._modules["12"].weight.data.zero_()
+            self.per_face_decoder[-1].bias.data.zero_()
+            self.per_face_decoder[-1].weight.data.zero_()
 
-        self.__global_trans = False
+        self.__global_trans = self.args.globaltrans
         if self.__global_trans:
             self.global_decoder = nn.Sequential(nn.Linear(code_dim, 128),
                                                 nn.ReLU(),
@@ -179,7 +198,10 @@ class MyNet(pl.LightningModule):
 		:return: BxTx3x3 a tensor of 3x3 jacobians, per T tris, per B targets in batch
 		'''
         # extract the encoding of the source and target
-        codes = self.extract_code(source, target)
+        if not self.args.layer_normalization == "FLATTEN":
+            codes = self.extract_code(source, target)
+        else:
+            codes = None
         # get the network predictions, a BxTx3x3 tensor of 3x3 jacobians, per T tri, per B target in batch
         return self.predict_jacobians_from_codes(codes, source)
 
@@ -190,15 +212,29 @@ class MyNet(pl.LightningModule):
 		:param single_source_batch: the batch
 		:return:BxTx3x3 a tensor of 3x3 jacobians, per T tris, per B targets in batch
 		'''
-        # take all encodings z_i of targets, and all centroids c_j of triangles, and create a cartesian product of the two as a 2D tensor so each sample in it is a vector with rows (z_i|c_j)
-        net_input = PerCentroidBatchMaker.PerCentroidBatchMaker(codes, source.get_centroids_and_normals(), args=self.args)
-        stacked = net_input.to_stacked()
-        if self.args.layer_normalization != "GROUPNORM2":
-            stacked = net_input.prep_for_linear_layer(stacked)
+        if codes is None:
+            stacked = source.flat_vector
         else:
-            stacked = net_input.prep_for_conv1d(stacked)
+            # take all encodings z_i of targets, and all centroids c_j of triangles, and create a cartesian product of the two as a 2D tensor so each sample in it is a vector with rows (z_i|c_j)
+            net_input = PerCentroidBatchMaker.PerCentroidBatchMaker(codes, source.get_centroids_and_normals(), args=self.args)
+            stacked = net_input.to_stacked()
+            if self.args.layer_normalization != "GROUPNORM2":
+                stacked = net_input.prep_for_linear_layer(stacked)
+            else:
+                stacked = net_input.prep_for_conv1d(stacked)
         # feed the 2D tensor through the network, and get a 3x3 matrix for each (z_i|c_j)
         res = self.forward(stacked)
+
+        # Flat mode
+        if codes is None:
+            ret = res.reshape(res.shape[0], source.mesh_processor.faces.shape[0], 3, 3)
+
+            if self.__IDENTITY_INIT:
+                for i in range(0, 3):
+                    ret[:, :, i, i] += 1
+
+            return ret
+
         # because of stacking the result is a 9-entry vec for each (z_i|c_j), now let's turn it to a batch x tris x 9 tensor
         pred_J = net_input.back_to_non_stacked(res)
         # and now reshape 9 to 3x3
@@ -225,16 +261,42 @@ class MyNet(pl.LightningModule):
     #######################################
     # Pytorch Lightning Boilerplate code (training, logging, etc.)
     #######################################
-
     def training_step(self, source_batches, batch_id):
         # start = time.time()
         # torch.cuda.synchronize()
-        a = self.my_step(source_batches, batch_id)
+
+        batch_parts = self.my_step(source_batches, batch_id)
+
         # torch.cuda.synchronize()
         # print(f"training_step  {time.time() - start}")
         # self.log("V_loss", self.__vertex_loss_weight * a['vertex_loss'].item(), prog_bar=True, logger=False)
         # self.log("J_loss", a['jacobian_loss'].item(), prog_bar=True, logger=False)
-        return a
+
+        loss = batch_parts["loss"]
+        lossrecord = batch_parts["lossdict"]
+
+        self.log("train_loss", loss, logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+
+        # Log losses
+        for key, val in lossrecord[0].items():
+            if "loss" in key:
+                self.log(key, np.sum(val), logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+
+        if self.args.mem:
+            # Check memory consumption
+            # Get GPU memory usage
+            t = torch.cuda.get_device_properties(0).total_memory
+            r = torch.cuda.memory_reserved(0)
+            a = torch.cuda.memory_allocated(0)
+            m = torch.cuda.max_memory_allocated(0)
+            f = r-a  # free inside reserved
+            print(f"{a/1024**3:0.3f} GB allocated. \nGPU max memory alloc: {m/1024**3:0.3f} GB. \nGPU total memory: {t/1024**3:0.3f} GB.")
+
+            # Get CPU RAM usage too
+            import psutil
+            print(f'RAM memory % used: {psutil.virtual_memory()[2]}')
+
+        return loss
 
     def test_step(self, batch, batch_idx):
         return self.my_step(batch, batch_idx)
@@ -255,10 +317,24 @@ class MyNet(pl.LightningModule):
 
     def predict_map(self, source, target, initj=None):
         pred_J = self.predict_jacobians(source, target)
-        if self.args.align_2D:  # if the target is in 2D the last column of J is 0
-            pred_J[:, :,2] = 0
 
-        pred_V = source.vertices_from_jacobians(pred_J, initj=initj)
+        # Need initialization J to have batch dimension
+        if initj is not None:
+            if len(initj.shape) == 3:
+                initj = initj.unsqueeze(0)
+
+            pred_J = torch.cat([torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:2], initj[:,:,:2,:])),
+                                torch.zeros(pred_J.shape[0], pred_J.shape[1], 1, pred_J.shape[3], device=self.device)],
+                               dim=2) # B x F x 3 x 3
+
+        if self.args.align_2D:  # if the target is in 2D the last column of J is 0
+            pred_J[:, :,2,:] = 0 # NOTE: predJ shape is B x F x 3 x 3 (where first 3-size is interpreted as axes)
+
+        pred_V = source.vertices_from_jacobians(pred_J)
+
+        # Get back jacobians from predicted vertices
+        pred_J = source.poisson.jacobians_from_vertices(pred_V)
+
         pred_J_restricted = source.restrict_jacobians(pred_J)
         return pred_V, pred_J, pred_J_restricted
 
@@ -268,10 +344,125 @@ class MyNet(pl.LightningModule):
 
 
     def validation_step(self, batch, batch_idx):
-        return self.my_step(batch, batch_idx)
+        batch_parts = self.my_step(batch, batch_idx, validation=True)
+        val_loss = batch_parts['loss'].item()
+        self.log('val_loss', val_loss, logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+        self.log("lr", self.trainer.optimizers[0].param_groups[0]['lr'], prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+
+        self.val_step_iter += 1
+
+        ### Visualizations
+        lossdict = batch_parts['lossdict']
+        # Construct mesh and ftoe matrix
+        mesh = Mesh(batch_parts["source_V"], batch_parts["ogT"])
+        # Face to edges map
+        ftoe = computeFacetoEdges(mesh)
+
+        # Remap indexing to ignore the boundaries
+        neweidx = []
+        oldeidx = []
+        count = 0
+        for key, edge in sorted(mesh.topology.edges.items()):
+            if not edge.onBoundary():
+                neweidx.append(count)
+                oldeidx.append(edge.index)
+                count += 1
+        ebdtoe = np.zeros(np.max(list(mesh.topology.edges.keys())) + 1)
+        ebdtoe[oldeidx] = neweidx
+        ebdtoe = ebdtoe.astype(int)
+
+        new_ftoe = []
+        for es in ftoe:
+            new_ftoe.append(ebdtoe[es])
+        ftoe = new_ftoe
+
+        # Log losses
+        for key, val in lossdict[0].items():
+            if "loss" in key:
+                self.log(f"val_{key}", np.sum(val), logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+
+        # Log path
+        save_path = self.logger.save_dir
+
+        val_loss = batch_parts['loss'].item()
+        if self.args.xp_type == "uv":
+            if len(batch_parts["pred_V"].shape) == 4:
+                for idx in range(len(batch_parts["pred_V"])):
+                    plot_uv(os.path.join(save_path, 'frames'), f"epoch {self.global_step:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().numpy(),
+                            batch_parts["T"][idx].squeeze(), losses=lossdict[idx], ftoe=ftoe)
+            else:
+                plot_uv(os.path.join(save_path, 'frames'), f"epoch {self.global_step:05}", batch_parts["pred_V"].squeeze().detach().numpy(),
+                        batch_parts["T"].squeeze(), losses=lossdict[0], ftoe=ftoe)
+
+            # Log the plotted imgs
+            images = [os.path.join(save_path, 'frames', f"epoch_{self.global_step:05}.png")] + \
+                        [os.path.join(save_path, 'frames', f"{key}_epoch_{self.global_step:05}.png") for key in lossdict[0].keys() if "loss" in key]
+            self.logger.log_image(key='uvs', images=images, step=self.global_step)
+
+            # Postprocess stitch
+            # if self.args.lossgradientstitching:
+            #     plot_uv(os.path.join(save_path, 'frames'), f"gradstitch epoch {self.global_step:05}", batch_parts["stitchV"],
+            #             batch_parts["stitchT"].squeeze(), losses={'distortionloss': batch_parts['stitchDistortion'],
+            #                                                       'stitchdistortionloss': batch_parts['stitchDistortion'],
+            #                                                       'edgegradloss': lossdict[0]['edgegradloss']})
+            #     images = [os.path.join(save_path, 'frames', f"gradstitch_epoch_{self.global_step:05}.png")] + \
+            #                 [os.path.join(save_path, 'frames', f"{key}_gradstitch_epoch_{self.global_step:05}.png") for key in ['distortionloss', 'stitchdistortionloss', 'edgegradloss']]
+            #     self.logger.log_image(key='uvs', images=images, step=self.global_step)
+
+            ### Losses on 3D surfaces
+            for key, val in lossdict[0].items():
+                if "loss" in key: # Hacky way of avoiding aggregated values
+                    if "edge" in key:
+                        ftoeloss = np.array([np.sum(val[es]) for es in ftoe])
+                        export_views(mesh, os.path.join(save_path, 'frames'), filename=f"{key}_mesh_{self.global_step:05}.png",
+                                    plotname=f"Sum {key}: {np.sum(ftoeloss):0.4f}",
+                                    fcolor_vals=ftoeloss, device="cpu", n_sample=25, width=200, height=200,
+                                    vmin=0, vmax=0.3)
+                    else:
+                        export_views(mesh, os.path.join(save_path, 'frames'), filename=f"{key}_mesh_{self.global_step:05}.png",
+                                    plotname=f"Sum {key}: {np.sum(val):0.4f}",
+                                    fcolor_vals=val, device="cpu", n_sample=25, width=200, height=200,
+                                    vmin=0, vmax=0.6)
+
+            ## Poisson values
+            # Check poisson UVs (true UV)
+            if "poissonUV" in batch_parts.keys():
+                plot_uv(os.path.join(save_path, 'frames'), f"poisson epoch {self.global_step:05}", batch_parts["poissonUV"].squeeze().detach().numpy(),
+                        batch_parts["ogT"].squeeze(), losses={'distortionloss': batch_parts['poissonDistortion']})
+
+                images = [os.path.join(save_path, 'frames', f"poisson_epoch_{self.global_step:05}.png"), os.path.join(save_path, 'frames', f"distortionloss_poisson_epoch_{self.global_step:05}.png")]
+                self.logger.log_image(key='poisson uvs', images=images, step=self.global_step)
+
+
+            export_views(mesh, os.path.join(save_path, 'frames'), filename=f"poisson_mesh_{self.global_step:05}.png",
+                        plotname=f"Poisson Distortion Loss: {np.sum(batch_parts['poissonDistortion']):0.4f}",
+                        fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
+                        vmin=0, vmax=0.6)
+
+            # if self.args.lossgradientstitching:
+            #     # Convert edge cuts to vertex values (separate for each tri => in order of tris)
+            #     cutedges = batch_parts['cutEdges'] # Indices of cut edges
+            #     vs, fs, es = mesh.export_soup()
+            #     cutvs = np.unique(es[cutedges]) # Indices of cut vs
+            #     vcut_vals = []
+            #     for f in fs:
+            #         for v in f:
+            #             if v in cutvs:
+            #                 vcut_vals.append(1)
+            #             else:
+            #                 vcut_vals.append(0)
+            #     vcut_vals = np.array(vcut_vals)
+
+            #     export_views(mesh, os.path.join(save_path, 'frames'), filename=f"stitch_mesh_{self.global_step:05}.png",
+            #                 plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
+            #                 vcolor_vals= vcut_vals, device="cpu", n_sample=25, width=200, height=200,
+            #                 vmin=0, vmax=1, outline_width=0)
+            # else:
+
+        return val_loss
 
     ### TRAINING STEP HERE ###
-    def my_step(self, source_batch, batch_idx, test=False):
+    def my_step(self, source_batch, batch_idx, validation=False):
         # sanity checking the poisson solve, getting back GT vertices from GT jacobians. This is not used in this training.
         # GTT = batches.get_batch(0).poisson.jacobians_from_vertices(pred_V[0])
         # 		GT_V = batches.get_batch(0).poisson.solve_poisson(GTT)
@@ -279,45 +470,94 @@ class MyNet(pl.LightningModule):
         # TODO: include in source batch the precomputed Jacobian of Tutte embeddings
         source = source_batch[0]
         target = source_batch[1]
-        if self.args.tutteinit:
-            tuttej = source.tuttej
+
+        initj = None
+        initfuv = None
+        sourcedim = 3
+        if self.args.init == "tutte":
+            initj = source.tuttej.squeeze()
+            initfuv = source.tuttefuv.squeeze()
+        elif self.args.init == "isometric":
+            sourcedim = 2
+            initj = None # NOTE: this is guaranteed to be isometric, so don't need to composite for computing distortion
+            initfuv = source.isofuv.squeeze()
+
+        # Debugging: tutte fuvs make sense
+        if self.args.debug and self.args.init:
+            import matplotlib.pyplot as plt
+            fig, axs = plt.subplots(figsize=(6, 4))
+            checkinit = initfuv.reshape(-1, 2).detach().cpu().numpy()
+            checktris = np.arange(len(checkinit)).reshape(-1, 3)
+            axs.triplot(checkinit[:,0], checkinit[:,1], checktris, linewidth=0.5)
+            plt.axis('off')
+            plt.savefig(f"scratch/{source.source_ind}_fuv.png")
+            plt.close(fig)
+            plt.cla()
 
         vertices = source.get_vertices()
         faces = torch.from_numpy(source.get_source_triangles()).long().to(self.device)
 
-        # TODO: CHECK THESE TENSORS
         if self.args.no_poisson:
-            pred_J = self.predict_jacobians(source, target)
-            pred_J_restricted = self.restrict_jacobians(pred_J)
+            pred_J = self.predict_jacobians(source, target).squeeze() # NOTE: this takes B x F x 3 x 3 => F x 3 x 3
+            pred_J_restricted = source.restrict_jacobians(pred_J)
 
             # Compute the UV map by dropping last dimension of predJ and multiplying against the face matrices
-            fverts = vertices[faces] # B x F x 3 x 3
-            if self.args.tutteinit:
-                pred_V = torch.einsum("abcd,abce,abej->abcj", (fverts, tuttej, pred_J[:,:2,:2])) # B x F x 3 x 2
+            fverts = vertices[faces].transpose(1,2) # F x 3 x 3
+            if self.args.init:
+                # Batch size 1
+                # TODO: swap the einsums so we interpret Jacobians correctly (NOT the transpose)
+                # Reconstruct the initialization UV (minus global translation)
+                pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:2], initfuv.transpose(1,2))).transpose(1,2) # F x 3 x 2
+                # pred_V = torch.einsum("bcd,bde->bce", (tuttefuv, pred_J[:,:2,:2])) # F x 3 x 2
+                # pred_V = torch.einsum("bcd,bce,bej->bcj", (fverts, tuttej, pred_J[:,:2,:2]))
             else:
-                pred_V = torch.einsum("abcd,abde->abce", (fverts, pred_J[:,:,:2])) # B x F x 3 x 2
+                if len(fverts.shape) == 3:
+                    pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:], fverts)).transpose(1,2) # F x 3 x 2
+                    # pred_V = torch.einsum("bcd,bde->bce", (fverts, pred_J[:,:,:2])) # F x 3 x 2
+                else:
+                    pred_V = torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:], fverts)).transpose(2,3) # B x F x 3 x 2
+                    # pred_V = torch.einsum("abcd,abde->abce", (fverts, pred_J[:,:,:,:2])) # B x F x 3 x 2
 
-            # Center
-            pred_V = pred_V - torch.mean(pred_V, dim=2, keepdim=True)
+            # If gradient stitching, then we save a new tensor with the translated components
+            # NOTE: stop gradient here so the translation loss doesn't affect the network
+            if self.args.lossgradientstitching:
+                trans_V = pred_V.detach() + self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
+            # Add back the optimized translational components
+            else:
+                pred_V += self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
+
+            # Center (for visualization purposes)
+            # if len(fverts.shape) == 3:
+            #     pred_V = pred_V - torch.mean(pred_V, dim=[0,1], keepdim=True)
+            # else:
+            #     pred_V = pred_V - torch.mean(pred_V, dim=[1,2], keepdim=True)
         else:
-            pred_V, pred_J, pred_J_restricted = self.predict_map(source, target, initj=tuttej if self.args.tutteinit else None)
+            pred_V, pred_J, pred_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
 
-        # TODO: check that shape of J is correct!
         # Drop last dimension of restricted J
-        if pred_J_restricted.shape[3] == 3:
+        if pred_J_restricted.shape[2] == 3:
             pred_J_restricted = pred_J_restricted[:,:,:2]
 
         GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target)
 
         if UNIT_TEST_POISSON_SOLVE:
             success = self.check_map(source, target, GT_J, GT_V) < 0.0001
-            print(self.check_map(source, target, GT_J, GT_V))
+            # print(self.check_map(source, target, GT_J, GT_V))
             assert(success), f"UNIT_TEST_POISSON_SOLVE FAILED!! {self.check_map(source, target, GT_J, GT_V)}"
 
         # Compute losses
-        # TODO: make below batched
-        loss = self.lossfcn.computeloss(vertices, faces, pred_V[0,:,:2], pred_J_restricted, tuttej if self.args.tutteinit else None)
+        # HACK: lerp seplossdelta
+        if self.args.seploss_schedule:
+            ratio = self.global_step/self.trainer.max_epochs
+            seplossdelta = ratio * self.args.seplossdelta + (1 - ratio) * self.args.seplossdelta_min
+        else:
+            seplossdelta = self.args.seplossdelta
+
+        # NOTE: pred_V should be F x 3 x 2
+        loss = self.lossfcn.computeloss(vertices, faces, pred_V, pred_J[:,:2,:sourcedim], initjacobs=initj,
+                                        seplossdelta=seplossdelta, transuv=trans_V if self.args.lossgradientstitching else None)
         lossrecord = self.lossfcn.exportloss()
+        self.lossfcn.clear() # This resets the loss record dictionary
 
         loss = loss.type_as(GT_V)
         if self.verbose:
@@ -327,32 +567,92 @@ class MyNet(pl.LightningModule):
             "target_V": target.get_vertices().detach(),
             "source_V": source.get_vertices().detach(),
             "pred_V": pred_V.detach(),
-            "T": source.get_source_triangles(),
+            "T": faces.detach().numpy(),
             'source_ind': source.source_ind,
             'target_inds': target.target_inds,
-            "loss": lossrecord
+            "lossdict": lossrecord,
+            "loss": loss
         }
 
+        # Need to adjust the return values if no poisson solve
+        if self.args.no_poisson and len(pred_V) == len(faces):
+            ret['pred_V'] = pred_V.detach().reshape(-1, 2)
+
+            # Triangle soup
+            ret['ogT'] = ret['T'] # Save original triangle indices
+            ret['T'] = np.arange(len(faces)*3).reshape(len(faces), 3)
+
+            # Debugging: predicted fuvs make sense
+            if self.args.debug:
+                import matplotlib.pyplot as plt
+                fig, axs = plt.subplots(figsize=(6, 4))
+                axs.triplot(ret['pred_V'][:,0], ret['pred_V'][:,1], ret['T'], linewidth=0.5)
+                plt.axis('off')
+                plt.savefig(f"scratch/{source.source_ind}_fuv_pred.png")
+                plt.close(fig)
+                plt.cla()
+
+        if validation:
+            if self.args.init == "isometric":
+                initj = source.isoj.squeeze()
+
+            # NOTE: Post-process topology if running edge gradient optimization
+            # Run poisson solve on updated topology
+            # if self.args.lossgradientstitching:
+            #     # TODO: WE'RE CUTTING THE BOUNDARY EDGES ON ACCIDENT
+            #     postv, postf, cutedges, cutlength = stitchtopology(ret['source_V'].detach().cpu().numpy(), ret['ogT'], lossrecord[0]['edgegradloss'],
+            #                                                        epsilon=self.args.stitcheps,
+            #                                                        return_cut_edges=True, return_cut_length = True)
+            #     meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(postv, postf, source.source_dir, source._SourceMesh__ttype, cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks, load_wks_centroids=source._SourceMesh__use_wks)
+            #     meshprocessor.prepare_temporary_differential_operators(source._SourceMesh__ttype)
+            #     poissonsolver = meshprocessor.diff_ops.poisson_solver
+            #     with torch.no_grad():
+            #         # Need full Jacobian for poisson solve
+            #         if len(pred_J.shape) == 3:
+            #             pred_J = pred_J.unsqueeze(0)
+            #         if len(initj.shape) == 3:
+            #             initj = initj.unsqueeze(0)
+            #         if initj is not None:
+            #             pred_J = torch.cat([torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:2], initj[:,:,:2,:])),
+            #                                 torch.zeros(pred_J.shape[0], pred_J.shape[1], 1, pred_J.shape[3], device=self.device)],
+            #                             dim=2) # B x F x 3 x 3
+            #         if self.args.align_2D:  # if the target is in 2D the last column of J is 0
+            #             pred_J[:, :,2,:] = 0 # NOTE: predJ shape is B x F x 3 x 3 (where first 3-size is interpreted as axes)
+            #         # TODO: ASK NOAM ABOUT WHETHER YOU CAN DO THIS WITH TRIANGLE SOUP
+            #         stitchv = poissonsolver.solve_poisson(pred_J)
+            #         stitchJ = poissonsolver.jacobians_from_vertices(stitchv)
+
+            #     ret['stitchV'] = stitchv.squeeze().detach().cpu().numpy()
+            #     ret['stitchT'] = postf
+
+            #     ret['cutEdges'] = cutedges
+            #     ret['cutLength'] = cutlength
+
+            #     # Compute distortion of stitched mesh
+            #     stitchdirichlet = symmetricdirichlet(torch.from_numpy(postv).to(self.device), torch.from_numpy(postf).to(self.device), stitchJ[0, :,:2,:])
+            #     ret['stitchDistortion'] = stitchdirichlet.detach().cpu().numpy()
+
+            ret['pred_V'] = pred_V.detach().reshape(-1, 2)
+            ret['T'] = np.arange(len(faces)*3).reshape(len(faces), 3)
+
+            with torch.no_grad():
+                pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
+
+            # Predicted UV should also be same up to global translation
+            # predfvert = ret['pred_V'][ret['T']]
+            # poisfvert = pred_V[0][ret['ogT']]
+            # diff = predfvert - poisfvert[:,:,:2]
+
+            ret['poissonUV'] = pred_V
+            # NOTE: Initj already FACTORED into the predict map!!
+            poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
+            ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
+
         if self.args.test:
-            ret['pred_J_R'] = pred_J_restricted.detach()
+            ret['pred_J_R'] = poisson_J_restricted.detach()
             ret['target_J_R'] = GT_J_restricted.detach()
 
         return ret
-
-    def validation_step_end(self, batch_parts):
-        self.val_step_iter += 1
-
-        val_loss = batch_parts["loss"]['total']
-        if self.args.xp_type == "uv":
-            self.log('val_loss', val_loss, logger=True, prog_bar=True, batch_size=1)
-
-            lossdict = batch_parts['loss']
-            for idx in range(len(batch_parts["pred_V"])):
-                plot_uv(self.logger.log_dir, f"uv_{self.global_step:04}_b{idx:04}.png", batch_parts["pred_V"][idx].squeeze().detach().numpy(),
-                        batch_parts["T"][idx].squeeze(), losses=lossdict[idx])
-
-        # self.log('valid_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
-        return val_loss
 
     def test_step_end(self, batch_parts):
         def screenshot(fname, V, F):
@@ -379,12 +679,14 @@ class MyNet(pl.LightningModule):
         # colors = self.colors(batch_parts["source_V"][0].cpu().numpy(), batch_parts["T"][0])
         #
         # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
-        if self.args.xp_type == "uv":
-            if self.val_step_iter % 100 == 0:
-                print("saving validation intermediary results.")
-                for idx in range(len(batch_parts["pred_V"])):
-                    path = Path(self.logger.log_dir) / f"valid_batchidx_{idx:04}.png"
-                    plot_uv(path, batch_parts["target_V"][idx].squeeze().cpu().numpy(), batch_parts["T"][idx].squeeze())
+
+        # TODO: fix below
+        # if self.args.xp_type == "uv":
+        #     if self.val_step_iter % 100 == 0:
+        #         print("saving validation intermediary results.")
+        #         for idx in range(len(batch_parts["pred_V"])):
+        #             path = Path(self.logger.log_dir) / f"valid_batchidx_{idx:05}.png"
+        #             plot_uv(path, batch_parts["target_V"][idx].squeeze().cpu().numpy(), batch_parts["T"][idx].squeeze())
 
         # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
         MAX_SOURCES_TO_SAVE = 11000000
@@ -541,40 +843,11 @@ class MyNet(pl.LightningModule):
         self.__test_stats.dump(os.path.join(self.logger.log_dir, 'teststats'))
         return loss
 
-    def validation_epoch_end(self, losses):
-        self.val_step_iter = 0
-        self.log_validate = True
-
     def colors(self, v, f):
         vv = igl.per_vertex_normals(v, f)
         vv = (numpy.abs(vv) + 1) / 2
         colors = vv * 255
         return torch.from_numpy(colors).unsqueeze(0)
-
-    def training_step_end(self, batch_parts):
-        # torch.cuda.synchronize()
-        # This is called after each training_step, and stores the output of training_step in a list. This list can be longuer than 1 if training is distributed on multiple GPUs
-        # this next few lines make sure cupy releases all memory
-        loss = batch_parts["loss"]['total']
-
-        if self.global_step % FREQUENCY == 0:  # skipping for now AttributeError: 'MyNet' object has no attribute 'colors'
-            # TODO: HOW TO GET THIS TO SHOW CORRECTLY ON TENSORBOARD??
-            tb = self.logger.experiment
-            colors = self.colors(batch_parts["source_V"].cpu().numpy(), batch_parts["T"])
-
-            tb.add_mesh("training_predicted_mesh", vertices=batch_parts["pred_V"][0:1],
-                        faces=numpy.expand_dims(batch_parts["T"], 0),
-                        global_step=self.global_step, colors=colors)
-            tb.add_mesh("training_source_mesh", vertices=batch_parts["source_V"].unsqueeze(0),
-                        faces=numpy.expand_dims(batch_parts["T"], 0),
-                        global_step=self.global_step, colors=colors)
-            tb.add_mesh("training_target_mesh", vertices=batch_parts["target_V"][0:1],
-                        faces=numpy.expand_dims(batch_parts["T"], 0),
-                        global_step=self.global_step, colors=colors)
-            # tb.add_mesh("source_samples", vertices = batch_parts["source_samples"][0].unsqueeze(0), global_step=self.global_step)
-            tb.add_scalar("train loss", batch_parts["loss"]['total'], global_step=self.global_step)
-
-        return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx, unused=0):
         # if self.global_step % FREQUENCY == 0:
@@ -605,13 +878,35 @@ class MyNet(pl.LightningModule):
         pass
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
-        lr_scheduler = {
-            'scheduler': torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1),
-            'name': 'scheduler'
-            }
-        return [optimizer], [lr_scheduler]
+        if self.args.optimizer == "adam":
+            optimizer = torch.optim.Adam(list(self.parameters()), lr=self.lr)
+        if self.args.optimizer == "sgd":
+            optimizer = torch.optim.SGD(list(self.parameters()), lr=self.lr)
+        # scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
+        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.5, threshold=0.0001,
+                                                                min_lr=1e-7, verbose=True)
 
+        # Add translation as additional parameter
+        if self.args.no_poisson:
+            self.trainer.fit_loop.setup_data()
+            dataloader = self.trainer.train_dataloader
+            for i, bundle in enumerate(dataloader):
+                source, target = bundle
+                faces = source.get_source_triangles()
+                init_translate = torch.ones(faces.shape[0], 1, 2).to(self.device).float() * 0.5
+                init_translate.requires_grad_()
+                additional_parameters = [init_translate]
+                optimizer.add_param_group({"params": additional_parameters, 'lr': 1e-6})
+
+                # HACK: Need to also extend scheduler's min_lrs
+                scheduler1.min_lrs.append(1e-8)
+
+        return {"optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler1,
+                    "monitor": "train_loss",
+                    },
+                }
 
 def custom_collate(data):
     assert len(data) == 1, 'we work on a single batch object'
@@ -649,8 +944,16 @@ def load_network_from_checkpoint(gen, args=None, cpuonly = False):
     return model
 
 
-def main(gen, log_dir_name, args):
-    seed_everything(48, workers=True)
+def main(gen, args):
+    pl.seed_everything(48, workers=True)
+
+    # Save directory
+    save_path = os.path.join("outputs", args.expname)
+    if args.overwrite and os.path.exists(save_path):
+        from utils import clear_directory
+        clear_directory(save_path)
+    Path(save_path).mkdir(exist_ok=True, parents=True)
+    Path(os.path.join(save_path, 'frames')).mkdir(exist_ok=True, parents=True)
 
     if not args.compute_human_data_on_the_fly:
         ### DEFAULT GOES HERE ###
@@ -668,6 +971,7 @@ def main(gen, log_dir_name, args):
     LOADING_CHECKPOINT = isinstance(gen, str)
     if LOADING_CHECKPOINT:
         model = load_network_from_checkpoint(gen, args)
+        LOADING_CHECKPOINT = gen
         gen = model.encoder
 
     if args.split_train_set:
@@ -696,12 +1000,22 @@ def main(gen, log_dir_name, args):
             elif  args.experiment_type == "TPOSE":
                 pairs_test = [(f"{(2*i):08d}", f"{(2*i+1):08d}") for i in range(args.size_test)]
 
-
         print("TEST :", len(pairs_test))
         valid_pairs = pairs_test
         train_pairs = pairs_train
 
-    logger = TensorBoardLogger("lightning_logs", name=log_dir_name)
+    id = None
+    if args.continuetrain:
+        import re
+        for idfile in os.listdir(os.path.join('outputs', args.expname, 'wandb', 'latest-run')):
+            if idfile.endswith(".wandb"):
+                result = re.search(r'run-([a-zA-Z0-9]+)', idfile)
+                if result is not None:
+                    id = result.group(1)
+                    break
+
+    logger = WandbLogger(project='njfwand', name=args.expname, save_dir=os.path.join("outputs", args.expname), log_model='all' if not args.debug else False,
+                         offline=args.debug, resume='must' if args.continuetrain and id is not None else 'allow', id = id)
 
     # if args.gpu_strategy:
     #     if os.name != 'nt':  # no support for windows because of gloo
@@ -711,46 +1025,53 @@ def main(gen, log_dir_name, args):
     #             plugins = pl.plugins.training_type.DDPSpawnPlugin(find_unused_parameters=False)
     #
 
-    checkpoint_callback = ModelCheckpoint(monitor="val_loss", mode="min", save_on_train_epoch_end=False)
+    checkpoint_callback = ModelCheckpoint(monitor="train_loss", mode="min", save_on_train_epoch_end=False,
+                                          dirpath=os.path.join(save_path, "ckpt"), every_n_train_steps=10)
+
     lr_monitor = LearningRateMonitor(logging_interval='step')
     ################################ TRAINER #############################
     trainer = pl.Trainer(accelerator=has_gpu, devices=args.n_devices, precision=args.precision, log_every_n_steps=200,
                          max_epochs=args.epochs, sync_batchnorm=args.n_devices != 1,
-                         val_check_interval=(1.0 if args.no_validation else args.val_interval), logger=logger,
-                         plugins=None,
+                         check_val_every_n_epoch=args.val_interval,
+                         logger=logger,
+                         plugins=[SLURMEnvironment(requeue_signal=SIGUSR1)] if not args.debug else None,
                          accumulate_grad_batches=args.accumulate_grad_batches,
-                         num_sanity_val_steps=2,
+                         num_sanity_val_steps=1,
                          enable_model_summary=False,
                          enable_progress_bar=True,
                          num_nodes=1,
                          deterministic= args.deterministic,
-                         strategy='ddp' if torch.cuda.is_available() else None,
+                         strategy='ddp',
                          callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
-    if args.overwrite == "True":
+    # Cache directory
+    if args.overwritecache:
         from utils import clear_directory
-        clear_directory(trainer.logger.log_dir)
+        traincache = os.path.join(args.root_dir_train, "cache")
+        testcache = os.path.join(args.root_dir_test, "cache")
+        if os.path.exists(traincache):
+            clear_directory(traincache)
+        if os.path.exists(testcache):
+            clear_directory(testcache)
 
-    if trainer.precision == 16:
+    if trainer.precision == 16 or "16" in trainer.precision:
         use_dtype = torch.half
-    elif trainer.precision == 32:
+    elif trainer.precision == 32 or "32" in trainer.precision:
         use_dtype = torch.float
-    elif trainer.precision == 64:
+    elif trainer.precision == 64 or "64" in trainer.precision:
         use_dtype = torch.double
     else:
         raise Exception("trainer's precision is unexpected value")
 
-    print(len(train_pairs))
     train_dataset = DeformationDataset(train_pairs, gen.get_keys_to_load(True),
                                        gen.get_keys_to_load(False), use_dtype, train=True, args=args)
-    print(len(train_dataset))
     train_loader = DataLoader(train_dataset, batch_size=1, collate_fn=custom_collate, pin_memory = (args.unpin_memory is None),
                               shuffle=(args.test is None), num_workers=args.workers, persistent_workers=args.workers > 0)
 
     if args.no_validation or args.test:
         valid_loader = None
     else:
-        valid_dataset = DeformationDataset( valid_pairs, gen.get_keys_to_load(True),
+        valid_dataset = DeformationDataset(valid_pairs, gen.get_keys_to_load(True),
                                            gen.get_keys_to_load(False), use_dtype, train=False, args=args)
         valid_loader = DataLoader(valid_dataset, batch_size=1, collate_fn=custom_collate, pin_memory=(args.unpin_memory is None),
                                   shuffle=False, num_workers=0, persistent_workers=0)
@@ -788,24 +1109,137 @@ def main(gen, log_dir_name, args):
 
         trainer = pl.Trainer(accelerator=has_gpu, devices=args.n_devices, precision=32, max_epochs=10000,
                              overfit_batches=1)
-        trainer.fit(model, train_loader)
+        trainer.fit(model, train_loader, ckpt_path=LOADING_CHECKPOINT if LOADING_CHECKPOINT else None)
         return
 
     if args.test:
         print('&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&& TEST &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&')
-        trainer.test(model, train_loader)
+        trainer.test(model, train_loader, ckpt_path=LOADING_CHECKPOINT if LOADING_CHECKPOINT else None)
         return
 
-    print(len(train_loader))
-    trainer.fit(model, train_loader, valid_loader)
+    trainer.fit(model, train_loader, valid_loader, ckpt_path=LOADING_CHECKPOINT if LOADING_CHECKPOINT else None)
+
+    # Save UVs
+    for idx, data in enumerate(train_loader):
+        ret = model.my_step(data, idx, validation=True)
+        np.save(os.path.join(save_path, f"preduv_{idx}.npy"), ret['pred_V'].squeeze().detach().cpu().numpy())
+        np.save(os.path.join(save_path, f"predt_{idx}.npy"), ret['T'])
+
+        if args.no_poisson:
+            np.save(os.path.join(save_path, f"poissonuv_{idx}.npy"), ret['poissonUV'].squeeze().detach().cpu().numpy())
+            np.save(os.path.join(save_path, f"poissont_{idx}.npy"), ret['ogT']) # NOTE: poisson T uses original triangles!
 
     # Generate gif of training process
+    pref = ""
+    # if args.lossgradientstitching:
+    #     pref = "gradstitch_"
+
     if args.xp_type == "uv":
         from PIL import Image
         import glob
-        fp_in = f"{logger.log_dir}/*.png"
-        fp_out = f"{logger.log_dir}/train.gif"
-        imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+        import re
+        ## Default UV gif
+        fp_in = f"{os.path.join(save_path, 'frames')}/{pref}epoch_*.png"
+        fp_out = f"{save_path}/{pref}train.gif"
+        imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
+
+        # Resize images
+        basewidth = 400
+        wpercent = basewidth/imgs[0].size[0]
+        newheight = int(wpercent * imgs[0].size[1])
+        imgs = [img.resize((basewidth, newheight)) for img in imgs]
+
         imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-                save_all=True, duration=40, loop=0, disposal=2)
+                save_all=True, duration=100, loop=0, disposal=2)
+
+        ## Individual losses
+        lossnames = model.lossfcn.lossnames
+        # if args.lossgradientstitching:
+        #     lossnames.append('stitchdistortionloss')
+
+        for key in lossnames:
+            if "loss" in key:
+                # Embedding viz
+                fp_in = f"{os.path.join(save_path, 'frames')}/{key}_{pref}epoch_*.png"
+                fp_out = f"{save_path}/train_{pref}{key}.gif"
+                imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+
+                # Resize images
+                basewidth = 400
+                wpercent = basewidth/imgs[0].size[0]
+                newheight = int(wpercent * imgs[0].size[1])
+                imgs = [img.resize((basewidth, newheight)) for img in imgs]
+
+                imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                        save_all=True, duration=100, loop=0, disposal=2)
+
+                # Mesh viz
+                fp_in = f"{os.path.join(save_path, 'frames')}/{key}_mesh_*.png"
+                fp_out = f"{save_path}/train_{key}_mesh.gif"
+                imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+
+                # Resize images
+                basewidth = 1000
+                wpercent = basewidth/imgs[0].size[0]
+                newheight = int(wpercent * imgs[0].size[1])
+                imgs = [img.resize((basewidth, newheight)) for img in imgs]
+
+                imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                        save_all=True, duration=100, loop=0, disposal=2)
+
+        # Stitching
+        # if args.lossgradientstitching:
+        #     # Base
+        #     fp_in = f"{os.path.join(save_path, 'frames')}/stitch_mesh_*.png"
+        #     fp_out = f"{save_path}/stitch_mesh.gif"
+        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
+
+        #     # Resize images
+        #     basewidth = 1000
+        #     wpercent = basewidth/imgs[0].size[0]
+        #     newheight = int(wpercent * imgs[0].size[1])
+        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
+        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+        #             save_all=True, duration=100, loop=0, disposal=2)
+
+        ## Poisson solve
+        if args.no_poisson:
+            # Base
+            fp_in = f"{os.path.join(save_path, 'frames')}/poisson_epoch_*.png"
+            fp_out = f"{save_path}/train_poisson.gif"
+            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
+
+            # Resize images
+            basewidth = 400
+            wpercent = basewidth/imgs[0].size[0]
+            newheight = int(wpercent * imgs[0].size[1])
+            imgs = [img.resize((basewidth, newheight)) for img in imgs]
+            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                    save_all=True, duration=100, loop=0, disposal=2)
+
+            # Embedding distortion
+            fp_in = f"{os.path.join(save_path, 'frames')}/distortionloss_poisson_epoch_*.png"
+            fp_out = f"{save_path}/train_poisson_distortionloss.gif"
+            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+
+            # Resize images
+            basewidth = 400
+            wpercent = basewidth/imgs[0].size[0]
+            newheight = int(wpercent * imgs[0].size[1])
+            imgs = [img.resize((basewidth, newheight)) for img in imgs]
+            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                    save_all=True, duration=100, loop=0, disposal=2)
+
+            # Mesh distortion
+            fp_in = f"{os.path.join(save_path, 'frames')}/poisson_mesh_*.png"
+            fp_out = f"{save_path}/train_poisson_mesh.gif"
+            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+
+            # Resize images
+            basewidth = 1000
+            wpercent = basewidth/imgs[0].size[0]
+            newheight = int(wpercent * imgs[0].size[1])
+            imgs = [img.resize((basewidth, newheight)) for img in imgs]
+            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                    save_all=True, duration=100, loop=0, disposal=2)
     # ================ #

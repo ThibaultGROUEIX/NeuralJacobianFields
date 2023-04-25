@@ -6,6 +6,7 @@ import time
 
 from scipy.sparse import diags,coo_matrix
 from scipy.sparse import csc_matrix as sp_csc
+from scipy import sparse
 
 
 USE_TORCH_SPARSE = True ## This uses TORCH_SPARSE instead of TORCH.SPARSE
@@ -127,7 +128,7 @@ class PoissonSystemMatrices:
     Refacto : merge with Poisson Solver
     Only accept SparseMat representation
     '''
-    def __init__(self, V, F,grad, rhs, w, ttype, is_sparse = True, lap = None, cpuonly=False):
+    def __init__(self, V, F,grad, rhs, w, ttype, is_sparse = True, lap = None, lap_pinned=None, components=None, cpuonly=False):
         self.dim = 3
         self.is_sparse = is_sparse
         self.w = w
@@ -139,6 +140,8 @@ class PoissonSystemMatrices:
         self.__splu_perm_c = None
         self.__splu_perm_r = None
         self.lap = lap
+        self.lap_pinned = lap_pinned
+        self.components = components
         self.__V = V
         self.__F = F
         self.cpuonly = cpuonly
@@ -146,7 +149,7 @@ class PoissonSystemMatrices:
 
 
     def create_poisson_solver(self):
-        return PoissonSolver(self.igl_grad,self.w,self.rhs, None, self.lap)
+        return PoissonSolver(self.igl_grad,self.w,self.rhs, None, self.lap, self.lap_pinned, self.components)
 
     def create_poisson_solver_from_splu_old(self, lap_L, lap_U, lap_perm_c, lap_perm_r):
         w = torch.from_numpy(self.w).type(self.ttype)
@@ -184,7 +187,7 @@ class PoissonSystemMatrices:
     def compute_laplacian(self):
         if self.lap is None:
             self.lap = igl.cotmatrix(self.__V,self.__F)
-            self.lap = self.lap[1:, 1:]
+            self.lap = self.lap[1:, 1:] # NOTE: This is where the pinning alters the laplacian
             self.lap = SparseMat.from_coo(self.lap.tocoo(), torch.float64)
 
         if isinstance(self.lap,PoissonSystemMatrices) and self.lap.vals.shape[0] == self.__V.shape[0]:
@@ -285,12 +288,14 @@ class PoissonSolver:
     an object to compute gradients and solve poisson
     '''
 
-    def __init__(self,grad,W,rhs,my_splu, lap=None):
+    def __init__(self,grad,W,rhs,my_splu, lap=None, lap_pinned=None, components=None):
         self.W = torch.from_numpy(W).double()
         self.grad = grad
         self.rhs = rhs
         self.my_splu = my_splu
         self.lap = lap
+        self.lap_pinned = lap_pinned
+        self.components = components
         self.sparse_grad = grad
         self.sparse_rhs = rhs
 
@@ -350,9 +355,25 @@ class PoissonSolver:
         # print(f"SOLVER decomposition {time.time() - st}")
 
         sol = _predicted_jacobians_to_vertices_via_poisson_solve(self.my_splu, self.sparse_rhs, jacobians.transpose(2, 3).reshape(jacobians.shape[0], -1, 3, 1).squeeze(3).contiguous())
+
+        if self.lap_pinned is not None:
+            for i in range(len(self.lap_pinned)):
+                # The index should never be larger than length of array
+                pidx = self.lap_pinned[i]
+                assert sol.shape[1] >= pidx, f"Indexing error: trying to insert at {pidx} for array of size {sol.shape[1]}"
+                sol = torch.cat([sol[:, :pidx], torch.zeros(sol.shape[0], 1, sol.shape[2]).type_as(sol), sol[:,pidx:]], dim=1)
+
+            assert sol.shape[1] == len(self.components), f"Final UVs after undoing pinning {sol.shape[1]} should be same as components array {len(self.components)}"
+            pin_trans = torch.zeros(sol.shape) # Should be same length
+            # Assign same component groups the same translation
+            for cpi in np.unique(self.components):
+                cp_idx = np.where(self.components == cpi)[0]
+                pin_trans[:,cp_idx] = torch.rand((sol.shape[0], 1, sol.shape[2]), device=sol.device)
+            sol += pin_trans
+
         # torch.cuda.synchronize()
         # print(f"POISSON LU + SOLVE FORWARD{time.time() - st}")
-        c = torch.mean(sol, axis=1).unsqueeze(1)  ## Beware the predicted mesh is centered here.
+        c = torch.mean(sol, axis=1, keepdim=True)
         # print(f"time for poisson: {time.time() - st}" )
         return sol - c
 
@@ -389,14 +410,29 @@ def poisson_system_matrices_from_mesh( V,F, dim=3,ttype = torch.float64, is_spar
         mass = mass[:-mass.shape[0]//3,:-mass.shape[0]//3]
 
     laplace = grad.T@mass@grad
-    laplace = laplace[1:, 1:]
+    laplace = laplace.todense()
+    component_i, components, component_sizes = igl.connected_components(igl.adjacency_matrix(faces))
+    # Find first index for each component
+    lap_pinned = []
+    for i in range(component_sizes.size):
+        cp_idx = np.where(components == i)[0][0]
+        lap_pinned.append(cp_idx)
+    lap_pinned = np.array(lap_pinned)
+    laplace = np.delete(np.delete(laplace, lap_pinned, axis=0), lap_pinned, axis=1) # Remove row and column
+
+    # Convert back to sparse matrix
+    if is_sparse:
+        laplace = sparse.csr_matrix(laplace)
 
     rhs = grad.T@mass
     b1,b2,_ = igl.local_basis(V,F)
     w = np.stack((b1,b2),axis=-1)
     # print(time.time() - s)
 
-    rhs = rhs[1:,:]
+    # Remove pinned indices from rhs as well
+    rhs = rhs.todense()
+    rhs = np.delete(rhs, lap_pinned, axis=0)
+    rhs = sparse.csr_matrix(rhs)
 
     if is_sparse:
         laplace = laplace.tocoo()
@@ -407,13 +443,15 @@ def poisson_system_matrices_from_mesh( V,F, dim=3,ttype = torch.float64, is_spar
         rhs = rhs.toarray()
         grad = grad.toarray()
 
+    # Undoing the pinning just means inserting back the values in index order
+    lap_pinned = np.sort(lap_pinned)
 
     grad = SparseMat.from_M(_convert_sparse_igl_grad_to_our_convention(grad), torch.float64)
     poissonbuilder =  PoissonSystemMatrices(V=V,F=F,grad=grad,
               rhs=SparseMat.from_coo(rhs, torch.float64), w=w,
               ttype=ttype,is_sparse=is_sparse,
               lap=SparseMat.from_coo(laplace, torch.float64),
-              cpuonly=cpuonly)
+              cpuonly=cpuonly, lap_pinned=lap_pinned, components=components)
     # poissonbuilder.get_new_grad()
     return poissonbuilder
 
@@ -610,12 +648,10 @@ def _predicted_jacobians_to_vertices_via_poisson_solve(Lap, rhs, jacobians):
 
     out = SPLUSolveLayer.apply(Lap, input_to_solve)
 
-    out = torch.cat([torch.zeros(out.shape[0], 1, out.shape[2]).type_as(out), out], dim=1)  ## Why?? Because!
-    out = out - torch.mean(out, axis=1, keepdim=True)
+    # NOTE: THIS PINS THE FIRST VERTEX TO ORIGIN
+    # out = torch.cat([torch.zeros(out.shape[0], 1, out.shape[2]).type_as(out), out], dim=1) # B x V x 2
 
     return out.type_as(jacobians)
-
-
 
 def _multiply_sparse_2d_by_dense_3d(mat, B):
     ret = []

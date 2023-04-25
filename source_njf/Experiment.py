@@ -107,15 +107,14 @@ class Experiment(ABC):
         maps.extend(pred_V)
         jacobians.extend(pred_J)
         return torch.stack(maps,dim = 0),torch.stack(jacobians, dim = 0), source, targets
-        
+
     def evaluate_on_source_and_targets(self,source,targets,args=None,cpuonly=False):
         source,targets = self.evaluate_on_source_and_targets_preprocess(source,targets,args,cpuonly)
         return self.evaluate_on_source_and_targets_inference(source,targets,args,cpuonly)
 
-    def get_args_and_train(self):
+    def get_args_and_train(self, args):
         if self.net is not None:
             warnings.warn("seems like you loaded a network, but are now running training -- FYI, the loaded network is not being used in training (you need to specify the checkpoint in CLI")
-        args = args_from_cli.parse_args()
         if args.compute_human_data_on_the_fly:
             # otherwize there is an issue in the workers. They can't all initialize CUDA.
             try:
@@ -127,19 +126,48 @@ class Experiment(ABC):
                 print("Failed to initialize muttiprocessing but keep going.")
         args = self.modify_args(args)
         self.args = args
+
+        # Change name based on the cli arg
+        self.name = self.args.expname
         print(f"starting training with args: {args}")
 
-
-        if args.checkpoint is None:
+        if not args.continuetrain:
             gen = self.get_encoder(args)
-        else:
-            print(f'************************** STARTING TRAINING FROM CHECKPOINT {args.checkpoint}' )
-            gen = args.checkpoint
-        
+        else: # Load latest checkpoint model based on checkpoints folder in output path
+            import re
+            checkpointdir = os.path.join("outputs", self.args.expname, "ckpt")
+            if os.path.exists(checkpointdir):
+                maxepoch = 0
+                maxstep = 0
+                checkpoint = None
+                for file in os.listdir(checkpointdir):
+                    if file.endswith(".ckpt"):
+                        result = re.search(r"epoch=(\d+)-step=(\d+)", file)
+                        epoch = int(result.group(1))
+                        step = int(result.group(2))
+
+                        if epoch > maxepoch:
+                            maxepoch = epoch
+                            maxstep = step
+                            checkpoint = os.path.join(checkpointdir, file)
+                        elif epoch == maxepoch and step > maxstep:
+                            maxstep = step
+                            checkpoint = os.path.join(checkpointdir, file)
+
+                if checkpoint is not None and os.path.exists(checkpoint):
+                    print(f'************************** STARTING TRAINING FROM CHECKPOINT {checkpoint}' )
+                    gen = checkpoint
+                else:
+                    print(f"No checkpoint found at {checkpointdir}!")
+                    gen = self.get_encoder(args)
+            else:
+                print(f"No checkpoint found at {checkpointdir}!")
+                gen = self.get_encoder(args)
+
         if args.test:
             name = os.path.join(name,'test')
 
-        main(gen, self.name, args)
+        main(gen, args)
 
     # def create_network(encoder, dataset):
     #     return MyNet(encoder, encoder.get_code_length(dataset), point_dim=dataset.get_point_dim())

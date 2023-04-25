@@ -1,6 +1,7 @@
 import os
 
 import numpy
+import numpy as np
 import torch
 import igl
 import MeshProcessor
@@ -10,6 +11,7 @@ import numpy as np
 import sys
 import random
 import time
+from utils import FourierFeatureTransform
 
 class SourceMesh:
     '''
@@ -18,9 +20,10 @@ class SourceMesh:
 
     def __init__(self, source_ind, source_dir, extra_source_fields,
                  random_scale, ttype, use_wks=False, random_centering=False,
-                cpuonly=False):
+                cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False):
         self.__use_wks = use_wks
         self.source_ind = source_ind
+        # NOTE: This is the CACHE DIRECTORY
         self.source_dir = source_dir
         self.centroids_and_normals = None
         self.center_source = True
@@ -34,6 +37,19 @@ class SourceMesh:
         self.source_mesh_centroid = None
         self.mesh_processor = None
         self.cpuonly = cpuonly
+        self.init = init
+        self.flatten = flatten
+
+        self.fft = None
+        if fft:
+            # Compute input channels
+            if self.__use_wks:
+                n_input = 106
+            else:
+                n_input = 6
+
+            # Initialize fourier features transform
+            self.fft = FourierFeatureTransform(n_input, fft_dim)
 
     def get_vertices(self):
         return self.source_vertices
@@ -80,15 +96,12 @@ class SourceMesh:
         bb = igl.bounding_box(self.source_vertices.numpy())[0]
         diag = igl.bounding_box_diagonal(self.source_vertices.numpy())
 
-        # self.source_mesh_centroid = torch.mean(self.source_vertices, axis=0)
         self.source_mesh_centroid =  (bb[0] + bb[-1])/2
         if self.random_centering:
             # centering augmentation
             self.source_mesh_centroid =  self.source_mesh_centroid + [(2*random.random() - 1)*diag*0.2, (2*random.random() - 1)*diag*0.2, (2*random.random() - 1)*diag*0.2]
-        # self.source_mesh_centroid =  (bb[0] + bb[-1])/2 - np.array([-0.00033245, -0.2910367 ,  0.02100835])
 
         # Load input to NJF MLP
-        # start = time.time()
         centroids = self.mesh_processor.get_centroids()
         centroid_points_and_normals = centroids.points_and_normals
         if self.__use_wks:
@@ -101,21 +114,120 @@ class SourceMesh:
             self.centroids_and_normals[:, 0:3] -= c
             self.source_vertices -= c
             self.__source_global_translation_to_original = c
+
+        if self.fft is not None:
+            self.centroids_and_normals = self.fft(self.centroids_and_normals)
+
         self.poisson = self.mesh_processor.diff_ops.poisson_solver
 
-        # Precompute Tutte if set
-        if self.args.tutteinit:
-            from utils import tutte_embedding
+        # Initialize random flat vector if set
+        if self.flatten:
+            self.flat_vector = torch.rand(1, len(self.mesh_processor.faces) * 9) * 100
 
-            self.tutteuv = torch.from_numpy(tutte_embedding(self.source_vertices.detach().cpu().numpy(),
-                                                            self.get_source_triangles().detach().cpu().numpy(), fixclosed=True))
+        # Precompute Tutte if set
+        if self.init == "tutte":
+            from utils import tutte_embedding, get_local_tris
+
+            vertices = self.source_vertices
+            device = vertices.device
+            faces = self.get_source_triangles()
+            fverts = vertices[faces].transpose(1,2)
+
+            self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), self.get_source_triangles(), fixclosed=True)).unsqueeze(0) # 1 x F x 2
+
+            # Convert Tutte to 3-dim
+            self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
 
             # Get Jacobians
-            self.tuttej = self.jacobians_from_vertices(self.tutteuv) # F x 3 x 3
+            self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
+
+            # DEBUG: make sure we can get back the original UVs up to global translation
+            pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
+            checktutte = self.tutteuv[0,faces,:2]
+            diff = pred_V - checktutte
+            diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
+            torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+
+            ## Save the global translations
+            self.tuttetranslate = (checktutte - pred_V)[:,:,:2]
+            self.tuttefuv = self.tutteuv[:,faces,:2] # B x F x 3 x 2
 
             ## Store in loaded data so it gets mapped to device
+            # Remove extraneous dimension
+            self.__loaded_data['tuttefuv'] = self.tuttefuv
             self.__loaded_data['tutteuv'] = self.tutteuv
             self.__loaded_data['tuttej'] = self.tuttej
+            self.__loaded_data['tuttetranslate'] = self.tuttetranslate
+
+            # self.__loaded_data['localj'] = self.localj
+
+            # Debugging: plot the initial embedding
+            # import matplotlib.pyplot as plt
+            # fig, axs = plt.subplots(figsize=(6, 4))
+            # # plot ours
+            # axs.triplot(self.tutteuv[0,:,0], self.tutteuv[0,:,1], self.get_source_triangles(), linewidth=0.5)
+            # plt.axis('off')
+            # plt.savefig(f"scratch/{self.source_ind}.png")
+            # plt.close(fig)
+            # plt.cla()
+        elif self.init == "isometric":
+            from utils import get_local_tris
+
+            vertices = self.source_vertices
+            device = vertices.device
+            faces = self.get_source_triangles()
+            fverts = vertices[faces]
+
+            local_tris = get_local_tris(vertices, faces) # F x 3 x 2
+
+            # Randomly sample displacements
+            # NOTE: might need to alter the scales here
+            self.isofuv = local_tris + np.random.uniform(size=(local_tris.shape[0], 1, local_tris.shape[2])) # F x 3 x 2
+
+            #### Get jacobians using gradient operator per triangle
+            from igl import grad
+
+            # Gradient operator (F*3 x V)
+            # NOTE: need to compute this separately per triangle b/c of soup
+            from scipy.sparse import bmat
+            G = []
+            for i in range(len(faces)):
+                G.append(grad(fverts[i].detach().cpu().numpy(), np.arange(3).reshape(1,3)))
+            # Create massive sparse block diagonal matrix
+            G = bmat([[None for _ in range(i)] + [G[i]] + [None for _ in range(i+1, len(G))] for i in range(len(G))])
+
+            # Convert local tris to soup
+            isosoup = self.isofuv.reshape(-1, 2).detach().cpu().numpy() # V x 2
+
+            # Get Jacobians
+            self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1)
+
+            # DEBUG: make sure we can get back the original UVs up to global translation
+            pred_V = torch.einsum("abc,acd->abd", (fverts, self.isoj.transpose(2,1)))
+            diff = pred_V - self.isofuv
+            diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle global translation
+            torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+
+            ## Save the global translations
+            self.isotranslate = self.isofuv - pred_V
+
+            ## Store in loaded data so it gets mapped to device
+            # NOTE: need to transpose isoj to interpret as 2x3
+            self.__loaded_data['isofuv'] = self.isofuv
+            self.__loaded_data['isoj'] = self.isoj
+            self.__loaded_data['isotranslate'] = self.isotranslate
+
+            # self.__loaded_data['localj'] = self.localj
+
+            # Debugging: plot the initial embedding
+            # import matplotlib.pyplot as plt
+            # fig, axs = plt.subplots(figsize=(6, 4))
+            # # plot ours
+            # axs.triplot(self.tutteuv[0,:,0], self.tutteuv[0,:,1], self.get_source_triangles(), linewidth=0.5)
+            # plt.axis('off')
+            # plt.savefig(f"scratch/{self.source_ind}.png")
+            # plt.close(fig)
+            # plt.cla()
 
         # Essentially here we load pointnet data and apply the same preprocessing
         for key in self.__extra_keys:
@@ -134,7 +246,6 @@ class SourceMesh:
         # print("Ellapsed load source mesh ", time.time() - start)
 
     def load(self, source_v=None, source_f=None):
-        # mesh_data = SourceMeshData.SourceMeshData.meshprocessor_from_file(self.source_dir)
         if source_v is not None and source_f is not None:
             self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_array(source_v,source_f, self.source_dir, self.__ttype, cpuonly=self.cpuonly, load_wks_samples=self.__use_wks, load_wks_centroids=self.__use_wks)
         else:
@@ -145,6 +256,8 @@ class SourceMesh:
         self.__init_from_mesh_data()
 
     def get_point_dim(self):
+        if self.flatten:
+            return self.flat_vector.shape[1]
         return self.centroids_and_normals.shape[1]
 
     def get_centroids_and_normals(self):

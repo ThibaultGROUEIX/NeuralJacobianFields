@@ -46,15 +46,34 @@ class UVLoss:
         self.device = device
         self.count = 0
 
+        ### Sanity checks
+        # Can only have one of seploss or gradloss
+        assert not (self.args.lossedgeseparation and self.args.lossgradientstitching), f"Can only have one type of edge loss!"
+
+        # Record loss names (for visualization)
+        self.lossnames = []
+        if self.args.lossdistortion:
+            self.lossnames.append("distortionloss")
+
+        if self.args.losscount and self.args.lossdistortion:
+            self.lossnames.append("countloss")
+
+        if self.args.lossedgeseparation:
+            self.lossnames.append("edgeseploss")
+
+        if self.args.lossgradientstitching:
+            self.lossnames.append("edgegradloss")
+
     def clear(self):
-        self.currentloss = {}
+        self.currentloss = defaultdict(dict)
         self.count = 0
 
-    def computeloss(self, vertices = None, faces = None, uv = None, jacobians = None, initjacobs=None):
+    def computeloss(self, vertices = None, faces = None, uv = None, jacobians = None, initjacobs=None, seplossdelta=0.1,
+                    transuv=None):
         loss = 0
         # Autocuts
         if self.args.lossautocut:
-            acloss = autocuts(vertices, faces, jacobians, uv, self.args.seplossweight, self.args.seplossdelta)
+            acloss = autocuts(vertices, faces, jacobians, uv, self.args.seplossweight, seplossdelta)
             loss += acloss
             self.currentloss[self.count]['autocuts'] = acloss.detach().item()
 
@@ -69,14 +88,14 @@ class UVLoss:
             self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
 
             if not self.args.losscount:
-                loss += torch.sum(distortionenergy)
+                loss += torch.mean(distortionenergy)
 
         if self.args.lossdistortion == "dirichlet":
-            distortionenergy = symmetricdirichlet(vertices, faces, uv, jacobians, init_jacob=initjacobs)
+            distortionenergy = symmetricdirichlet(vertices, faces, jacobians, init_jacob=initjacobs)
             self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
 
             if not self.args.losscount:
-                loss += torch.sum(distortionenergy)
+                loss += torch.mean(distortionenergy)
 
         if self.args.losscount and distortionenergy is not None:
             countloss = count_loss_v2(distortionenergy, fareas, return_softloss=False, device=self.device,
@@ -85,11 +104,26 @@ class UVLoss:
             loss += countloss
 
         if self.args.lossedgeseparation:
-            edgeseploss = uvseparation(vertices, faces, uv)
+            edgeseploss = torch.sum(uvseparation(vertices, faces, uv, loss= self.args.eseploss), dim=[1,2])
             # Relaxation
-            edgeseploss = torch.sum((edgeseploss * edgeseploss)/(edgeseploss * edgeseploss + self.args.seplossdelta))
+            # edgeseploss = torch.log(edgeseploss + 1)
+            edgeseploss = (edgeseploss * edgeseploss)/(edgeseploss * edgeseploss + seplossdelta)
+            loss += self.args.seplossweight * torch.mean(edgeseploss)
             self.currentloss[self.count]['edgeseploss'] = edgeseploss.detach().cpu().numpy()
-            loss += self.args.seplossweight * torch.sum(edgeseploss)
+
+        if self.args.lossgradientstitching:
+            if self.args.lossgradientstitching == "l2":
+                edgegradloss = torch.sum(uvgradloss(vertices, faces, uv), dim=1)
+            elif self.args.lossgradientstitching == "split":
+                edgegradloss = splitgradloss(vertices, faces, uv, cosine_weight=1, mag_weight=1)
+            loss += self.args.gradlossweight * torch.mean(edgegradloss)
+            self.currentloss[self.count]['edgegradloss'] = edgegradloss.detach().cpu().numpy()
+
+            # If transuv given, then also compute the edge separation loss
+            if transuv is not None:
+                edgeseploss = torch.sum(uvseparation(vertices, faces, transuv, loss='l2'), dim=[1,2])
+                loss += self.args.seplossweight * torch.mean(edgeseploss)
+                self.currentloss[self.count]['edgeseploss'] = edgeseploss.detach().cpu().numpy()
 
         self.currentloss[self.count]['total'] = loss.item()
         self.count += 1
@@ -108,19 +142,19 @@ def autocuts(vs, fs, js, uv, sepweight=1, delta=0.01, init_j=None):
        fs: F x 3
        js: F x 3 x 2
        uv: F x 3 x 2 """
-    dirichlet = symmetricdirichlet(vs, fs, uv, js, init_j)
+    dirichlet = torch.mean(symmetricdirichlet(vs, fs, uv, js, init_j))
 
     # Get vertex correspondences per edge
     # NOTE: ordering of vertices in UV MUST BE SAME as ordering of vertices in fs
     separation = uvseparation(vs, fs, uv)
-    separation = torch.sum((separation * separation)/(separation * separation + delta))
+    separation = torch.mean((separation * separation)/(separation * separation + delta))
     energy = dirichlet + sepweight * separation
     return energy
 
 # TODO: batch this across multiple meshes
 # NOTE: if given an initialization jacobian, then predicted jacob must be 2x2 matrix
 def symmetricdirichlet(vs, fs, jacob=None, init_jacob=None):
-
+    # Jacob: F x 2 x 3
     # TODO: Below can be precomputed
     # Get face areas
     from meshing import Mesh
@@ -130,65 +164,131 @@ def symmetricdirichlet(vs, fs, jacob=None, init_jacob=None):
     fareas = torch.from_numpy(mesh.fareas).to(vs.device)
 
     if jacob is not None:
-        if init_jacob:
+        mdim = 4 # NOTE: We will ALWAYS assume a 2x2 transformation so inverse is well defined
+        if init_jacob is not None:
+            # NOTE: assumes left multiplication => J' x J_I x Fvert
+            # Use 2x2 upper diagonal of predicted jacobian
+            if init_jacob.shape[1] > 2:
+                init_jacob = init_jacob[:,:2,:]
+
+            jacob2 = torch.matmul(jacob[:,:2,:2], init_jacob) # F x 2 x 3
+            # jacob2 = torch.matmul(init_jacob, jacob[:,:2,:2]) # F x 2 x 2
+
+            # Need final jacobian to be 2x2
+            if jacob2.shape[2] > 2:
+                jacob2 = torch.matmul(jacob2, jacob2.transpose(1,2))
+        elif jacob.shape[2] > 2:
             # Map jacob to 2x2 by multiplying against transpose
-            jacob2 = torch.matmul(init_jacob, torch.matmul(torch.transpose(jacob, 0, 1), jacob))
+            jacob2 = torch.matmul(jacob, jacob.transpose(1,2))
         else:
-            jacob2 = torch.matmul(torch.transpose(jacob, 0, 1), jacob)
+            jacob2 = jacob
         try:
             invjacob = torch.linalg.inv(jacob2)
         except Exception as e:
             print(f"Torch inv error on jacob2: {e}")
             invjacob = torch.linalg.pinv(jacob2)
-        energy = torch.sum(fareas * (torch.sum((jacob2 * jacob2).reshape(-1, 6), dim=-1) + torch.sum((invjacob * invjacob).reshape(-1, 6), dim=-1)))
+        energy = fareas * (torch.sum((jacob2 * jacob2).reshape(-1, mdim), dim=-1) + torch.sum((invjacob * invjacob).reshape(-1, mdim), dim=-1) - 4)
     else:
         # Rederive jacobians from UV values
         raise NotImplementedError("Symmetric dirichlet with manual jacobian calculation not implemented yet!")
     return energy
 
-def uvseparation(vs, fs, uv):
+def uvseparation(vs, fs, uv, loss='l1'):
+    """ uv: F x 3 x 2
+        vs: V x 3 (original topology)
+        fs: F x 3 (original topology) """
+
+    # TODO: Can pre-compute ALL of the mesh-related operations
     from meshing import Mesh
+    # NOTE: Mesh data structure doesn't respect original face ordering
+    # so we have to use custom edge-face connectivity export function
     mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
-    fconn, vconn = mesh.topology.export_edge_face_connectivity()
+    fconn, vconn = mesh.topology.export_edge_face_connectivity(mesh.faces) # NOTE: Removes boundaries
     fconn = np.array(fconn, dtype=int) # E x {f0, f1}
-    vconn = np.array(vconn, dtype=int) # E x {f0, f1} x {v0, v1}
-    ef0 = uv[(fconn[:,0], vconn[:,0])] # E x 2 x 2
-    ef1 = uv[(fconn[:,1], vconn[:,1])] # E x 2 x 2
-    separation = torch.nn.functional.l1_loss(ef0, ef1, reduction='none')
+    vconn = np.array(vconn, dtype=int) # E x {v0,v1}
+    ef0 = uv[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
+    ef1 = uv[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
+
+    # Weight each loss by length of 3D edge
+    elens = []
+    for i, edge in sorted(mesh.topology.edges.items()):
+        if edge.onBoundary():
+            continue
+        elens.append(mesh.length(edge))
+    elens = torch.tensor(elens, device=uv.device).reshape(len(elens), 1,1)
+
+    if loss == "l1":
+        separation = elens * torch.nn.functional.l1_loss(ef0, ef1, reduction='none')
+    elif loss == 'l2':
+        separation = elens * torch.nn.functional.mse_loss(ef0, ef1, reduction='none')
 
     return separation
 
-# def symmetricdirichlet(vertices, faces, param, face_area, param_area, return_face_energy=True):
-#     # Inverse equiareal term
-#     inv_area_distort = 1 + face_area ** 2 / param_area ** 2
-#     paramtris = param[faces]
-#     ogtris = vertices[faces]
+def uvgradloss(vs, fs, uv, loss='l2'):
+    """ uv: F x 3 x 2
+        vs: V x 3 (original topology)
+        fs: F x 3 (original topology) """
 
-#     # Debugging
-#     # print(paramtris[:,[0,2],:])
-#     # print(paramtris[:,[0,1],:])
-#     # vec1 = paramtris[:,2,:] - paramtris[:,0,:]
-#     # vec2 = paramtris[:,1,:] - paramtris[:,0,:]
-#     # ogvec1 = ogtris[:,1,:] - ogtris[:,0,:]
-#     # print(vec1[0])
-#     # print(vec2[0])
-#     # print(ogvec1[0])
-#     # tmp = torch.sum(vec1 * vec2, dim=-1)
-#     # print(tmp[0])
+    from meshing import Mesh
+    # NOTE: Mesh data structure doesn't respect original face ordering
+    # so we have to use custom edge-face connectivity export function
+    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
+    fconn, vconn = mesh.topology.export_edge_face_connectivity(mesh.faces)
+    fconn = np.array(fconn, dtype=int) # E x {f0, f1}
+    vconn = np.array(vconn, dtype=int) # E x {v0,v1}
+    ef0 = uv[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
+    ef1 = uv[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
 
-#     dirichlet_left = (torch.norm(paramtris[:, 2, :] - paramtris[:, 0, :], dim=1) ** 2 * torch.norm(
-#         ogtris[:, 1, :] - ogtris[:, 0, :], dim=1) ** 2 +
-#                       torch.norm(paramtris[:, 1, :] - paramtris[:, 0, :], dim=1) ** 2 * torch.norm(
-#                 ogtris[:, 2, :] - ogtris[:, 0, :], dim=1) ** 2) / (4 * face_area)
-#     dirichlet_right = (torch.sum((paramtris[:, 2, :] - paramtris[:, 0, :]) * (paramtris[:, 1, :] - paramtris[:, 0, :]),
-#                                  dim=-1) *
-#                        torch.sum((ogtris[:, 2, :] - ogtris[:, 0, :]) * (ogtris[:, 1, :] - ogtris[:, 0, :]), dim=-1)) / (
-#                                   2 * face_area)
-#     face_energy = inv_area_distort * (dirichlet_left - dirichlet_right)
+    # Compare the edge vectors (just need to make sure the edge origin vertices are consistent)
+    e0 = ef0[:,1] - ef0[:,0] # E x 2
+    e1 = ef1[:,1] - ef1[:,0] # E x 2
 
-#     if return_face_energy == False:
-#         return torch.sum(face_energy)
-#     return face_energy
+    # Weight each loss by length of 3D edge
+    elens = []
+    for i, edge in sorted(mesh.topology.edges.items()):
+        if edge.onBoundary():
+            continue
+        elens.append(mesh.length(edge))
+    elens = torch.tensor(elens, device=uv.device).reshape(len(elens), 1)
+
+    if loss == "l1":
+        separation = elens * torch.nn.functional.l1_loss(e0, e1, reduction='none')
+    elif loss == 'l2':
+        separation = elens * torch.nn.functional.mse_loss(e0, e1, reduction='none')
+
+    return separation
+
+def splitgradloss(vs, fs, uv, cosine_weight=1, mag_weight=1):
+    """ uv: F x 3 x 2
+        vs: V x 3 (original topology)
+        fs: F x 3 (original topology) """
+
+    from meshing import Mesh
+    # NOTE: Mesh data structure doesn't respect original face ordering
+    # so we have to use custom edge-face connectivity export function
+    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
+    fconn, vconn = mesh.topology.export_edge_face_connectivity(mesh.faces)
+    fconn = np.array(fconn, dtype=int) # E x {f0, f1}
+    vconn = np.array(vconn, dtype=int) # E x {v0,v1}
+    ef0 = uv[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
+    ef1 = uv[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
+
+    # Compare the edge vectors (just need to make sure the edge origin vertices are consistent)
+    e0 = ef0[:,1] - ef0[:,0]
+    e1 = ef1[:,1] - ef1[:,0]
+
+    # Weight each loss by length of 3D edge
+    elens = []
+    for i, edge in sorted(mesh.topology.edges.items()):
+        if edge.onBoundary():
+            continue
+        elens.append(mesh.length(edge))
+    elens = torch.tensor(elens, device=uv.device)
+
+    cosine_loss = -torch.nn.functional.cosine_similarity(e0, e1)
+    mag_loss = torch.nn.functional.mse_loss(torch.norm(e0, dim=1), torch.norm(e1, dim=1), reduction='none')
+
+    return elens * (cosine_weight * cosine_loss + mag_weight * mag_loss)
 
 def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, renormalize=True,
          face_weights=None, normalize_filter=0, device=torch.device("cpu"), verbose=False, timeit=False, **kwargs):

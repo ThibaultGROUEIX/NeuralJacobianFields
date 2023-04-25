@@ -7,7 +7,7 @@ import args_from_cli
 class UVExperiment(Experiment):
     def __init__(self, cpuonly=False):
         self.cpuonly = cpuonly
-        Experiment.__init__(self, "UVExperiment", 'Use NJF to predict UVs and supervise using distortion losses from DA Wand', cpuonly=cpuonly)
+        Experiment.__init__(self, "Cylinder", 'Use NJF to predict UVs and supervise using distortion losses from DA Wand', cpuonly=cpuonly)
 
     def init_encoder(self, encoder, args):
         # TODO: might not need pointnet conditioning for generalizability -- depends on what kind of message passing rest of NJF does
@@ -16,11 +16,11 @@ class UVExperiment(Experiment):
 
 if __name__ == '__main__':
     sys.argv.append("--root_dir_train")
-    sys.argv.append("./data/cylinder")
+    sys.argv.append("./data/cylinder_nocut")
     sys.argv.append("--root_dir_test")
-    sys.argv.append("./data/cylinder")
+    sys.argv.append("./data/cylinder_nocut")
     sys.argv.append("--expname")
-    sys.argv.append("UVExperiment")
+    sys.argv.append("Cylinder_Nocut")
 
     sys.argv.append("--experiment_type")
     sys.argv.append("DEFAULT")
@@ -32,8 +32,6 @@ if __name__ == '__main__':
     sys.argv.append("10000")
     sys.argv.append("--val_interval")
     sys.argv.append("20")
-    sys.argv.append("--optimizer")
-    sys.argv.append("adam")
     sys.argv.append("--data_file")
     sys.argv.append("cylinder.json")
     # sys.argv.append("--overfit_one_batch")
@@ -68,8 +66,9 @@ if __name__ == '__main__':
     # sys.argv.append("--debug")
 
     exp = UVExperiment()
-    args = args_from_cli.parse_args()
+
     #this parses the command line arguments and then trains on the given dataset with the given experiment
+    args = args_from_cli.parse_args()
     exp.get_args_and_train(args)
 
 #

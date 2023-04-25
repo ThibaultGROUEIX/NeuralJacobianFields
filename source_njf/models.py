@@ -10,7 +10,7 @@ class Encoder(nn.Module):
     '''
     def __init__(self, zdim, input_dim=3, vae = False, normalization="BATCHNORM"):
         super(Encoder, self).__init__()
-        
+
         self.zdim = zdim
         self.vae = vae
         self.normalization = normalization
@@ -51,7 +51,7 @@ class Encoder(nn.Module):
         # self.fc1 = nn.Linear(zdim, 256)
         # self.fc2 = nn.Linear(256, 128)
         # self.fcm = nn.Linear(128, zdim)
-        
+
         # if self.vae:
         #     self.fcv = nn.Linear(128, zdim)
 

@@ -5,7 +5,7 @@ from . import Halfedge, Edge, Vertex, Face, Topology
 from .analysis import computeVertexDihedrals, computeVertexEdgeRatios, computeAngleDeficit, normalize
 from .analysis import computeDihedrals, computeOppositeAngles, computeEdgeRatios
 from pathlib import Path
-from source_njf.utils import fix_orientation 
+from source_njf.utils import fix_orientation
 """
 every element index is unique and never recycled
 vertex deletion does not modify the self.vertices array.
@@ -17,27 +17,30 @@ class Mesh:
         self.topology = Topology()
         self.meshname=meshname
         self.export_dir = export_dir
-        self.anchor_fs = None 
-        if meshdata is not None:                        
+        self.anchor_fs = None
+        if meshdata is not None:
             self.topology = self.topology.build_from_halfedge_serialization(meshdata['halfedge_data'], do_check=True)
-            for attr in meshdata.keys(): 
+            for attr in meshdata.keys():
                 setattr(self, attr, meshdata[attr])
         else:
             self.vertices = vertices
             self.faces = face_indices.astype(int)
-            self.uvs = uvs 
+            self.uvs = uvs
             # self.faces = fix_orientation(self.vertices, face_indices.astype(int))
             self.topology.build(len(vertices), self.faces)
 
-    def export_soup(self):
+    def export_soup(self, remove_isolated_vertices=False):
         init_n = len(self.vertices)
         face_conn = np.array(self.topology.export_face_connectivity(), dtype=np.uint32)
         edge_conn = np.array(self.topology.export_edge_connectivity(), dtype=np.uint32)
 
         # only export remaining vertices; hence we never have to modify the
         # numpy array during edits
-        # is the code below readable?
-        old_inds = np.array(sorted(self.topology.vertices.keys()))
+        # NOTE: This keeps only referenced vertices
+        if remove_isolated_vertices:
+            old_inds = np.sort(np.unique(face_conn))
+        else:
+            old_inds = np.array(sorted(self.topology.vertices.keys()))
         new_inds = np.arange(len(old_inds), dtype=np.int)
         vertices = self.vertices[old_inds]
         A = np.zeros(init_n, dtype=np.int64)
@@ -52,53 +55,53 @@ class Mesh:
         if not self.export_dir and not export_dir:
             return
         if not meshname and not self.meshname:
-            return 
-        if not export_dir: 
+            return
+        if not export_dir:
             export_dir = self.export_dir
-        if not meshname: 
+        if not meshname:
             meshname = self.meshname
         Path(export_dir).mkdir(exist_ok=True, parents=True)
-        
+
         file = os.path.join(export_dir, f"{meshname}.obj")
         vertices, faces, edges = self.export_soup()
         with open(file, 'w') as f:
             for vi, v in enumerate(vertices):
                 f.write("v %f %f %f\n" % (v[0], v[1], v[2]))
-            if uv is not None: 
-                for v_uv in uv: 
+            if uv is not None:
+                for v_uv in uv:
                     f.write(f"vt {v_uv[0]} {v_uv[1]} \n")
-            if vnormals is not None: 
-                for vnormal in vnormals: 
-                    f.write(f"vn {vnormal[0]} {vnormal[1]} {vnormal[2]}\n")             
-            if fuv is not None: 
-                if fnormals is not None: 
+            if vnormals is not None:
+                for vnormal in vnormals:
+                    f.write(f"vn {vnormal[0]} {vnormal[1]} {vnormal[2]}\n")
+            if fuv is not None:
+                if fnormals is not None:
                     for i in range(len(faces)):
-                        face = faces[i] 
+                        face = faces[i]
                         faceuv = fuv[i]
                         fnormal = fnormals[i]
-                        f.write(f"f {face[0]+1:d}/{faceuv[0]+1:d}/{fnormal[0]+1:d} {face[1]+1:d}/{faceuv[1]+1:d}/{fnormal[1]+1:d} {face[2]+1:d}/{faceuv[2]+1:d}/{fnormal[2]+1:d}\n") 
-                else:             
+                        f.write(f"f {face[0]+1:d}/{faceuv[0]+1:d}/{fnormal[0]+1:d} {face[1]+1:d}/{faceuv[1]+1:d}/{fnormal[1]+1:d} {face[2]+1:d}/{faceuv[2]+1:d}/{fnormal[2]+1:d}\n")
+                else:
                     for i in range(len(faces)):
-                        face = faces[i] 
+                        face = faces[i]
                         faceuv = fuv[i]
-                        f.write(f"f {face[0]+1:d}/{faceuv[0]+1:d} {face[1]+1:d}/{faceuv[1]+1:d} {face[2]+1:d}/{faceuv[2]+1:d}\n")   
+                        f.write(f"f {face[0]+1:d}/{faceuv[0]+1:d} {face[1]+1:d}/{faceuv[1]+1:d} {face[2]+1:d}/{faceuv[2]+1:d}\n")
             elif fnormals is not None:
                 for i in range(len(faces)):
-                    face = faces[i] 
+                    face = faces[i]
                     fnormal = fnormals[i]
                     f.write(f"f {face[0]+1:d}//{fnormal[0]+1:d} {face[1]+1:d}//{fnormal[1]+1:d} {face[2]+1:d}//{fnormal[2]+1:d}\n")
             else:
                 for i in range(len(faces)):
-                    face = faces[i] 
+                    face = faces[i]
                     f.write(f"f {face[0]+1:d} {face[1]+1:d} {face[2]+1:d}\n")
             for edge in edges[:-1]:
                 f.write("e %d %d\n" % (edge[0] + 1, edge[1] + 1))
             f.write("e %d %d\n" % (edges[-1][0] + 1, edges[-1][1] + 1))
-            
-    # Return vertices and face connectivities associated with input faces 
+
+    # Return vertices and face connectivities associated with input faces
     def export_submesh(self, face_inds):
         init_n = len(self.vertices)
-        
+
         face_conn = np.array(self.topology.export_face_connectivity(), dtype=np.uint32)
         face_conn = face_conn[face_inds]
         v_inds = np.sort(np.unique(face_conn))
@@ -106,16 +109,16 @@ class Mesh:
         A = np.zeros(init_n, dtype=np.int64)
         A[v_inds] = np.arange(len(v_inds))
         face_conn = A[face_conn]
-        
-        # Edge case: exactly one face chosen 
-        if len(face_conn.shape) == 1: 
+
+        # Edge case: exactly one face chosen
+        if len(face_conn.shape) == 1:
             face_conn = face_conn.reshape(1,3)
-        
+
         return vertices, face_conn
 
     def normalize(self, copy_v=False):
         if copy_v:
-            import copy 
+            import copy
             newverts = copy.copy(self.vertices)
             newverts -= np.mean(newverts, axis=0)
             newverts /= np.max(np.linalg.norm(newverts, axis=1))
@@ -201,10 +204,10 @@ class Mesh:
 
     def computeEdgeFeatures(self, overwrite=False, intrinsics=[]):
         featuredict = {"dihedrals": computeDihedrals, "symmetricoppositeangles": computeOppositeAngles, "edgeratios":computeEdgeRatios}
-        if not hasattr(self, "edgefeatures") or overwrite: 
+        if not hasattr(self, "edgefeatures") or overwrite:
             with np.errstate(divide='raise'):
                 try:
-                    edgefeatures = [] 
+                    edgefeatures = []
                     for feature in featuredict.keys():
                         if not hasattr(self, feature) or overwrite:
                             featuredict[feature](self)
@@ -217,14 +220,14 @@ class Mesh:
                         self.edgefeatures = np.vstack(edgefeatures) # F x E
                 except Exception as e:
                     print(e)
-                    raise ValueError(self.meshname, 'bad features') 
-    
+                    raise ValueError(self.meshname, 'bad features')
+
     def computeVertexFeatures(self, overwrite=False, intrinsics=[]):
         featuredict = {"vertexdihedrals": computeVertexDihedrals, "angledeficit": computeAngleDeficit, "vertexedgeratios":computeVertexEdgeRatios}
-        if not hasattr(self, "vertexfeatures") or overwrite: 
+        if not hasattr(self, "vertexfeatures") or overwrite:
             with np.errstate(divide='raise'):
                 try:
-                    vertexfeatures = [] 
+                    vertexfeatures = []
                     for feature in featuredict.keys():
                         if not hasattr(self, feature) or overwrite:
                             featuredict[feature](self)
@@ -233,7 +236,7 @@ class Mesh:
                     if len(vertexfeatures) == 0:
                         self.vertexfeatures = np.array([])
                     else:
-                        self.vertexfeatures = np.column_stack(vertexfeatures) # V x C 
+                        self.vertexfeatures = np.column_stack(vertexfeatures) # V x C
                 except Exception as e:
                     print(e)
-                    raise ValueError(self.meshname, 'bad features') 
+                    raise ValueError(self.meshname, 'bad features')

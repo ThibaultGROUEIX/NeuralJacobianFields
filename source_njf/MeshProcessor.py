@@ -33,7 +33,7 @@ class MeshProcessor:
         :param ttype: the torch data type to use (float, half, double)
         :param source_dir: the directory to load the preprocessed data from; if given, will try to load the data before computing, if not given, always compute
         '''
-        
+
         self.ttype = ttype
         self.num_samples = NUM_SAMPLES
         self.vertices = vertices.squeeze()
@@ -70,13 +70,8 @@ class MeshProcessor:
 
     @staticmethod
     def meshprocessor_from_directory(source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False):
-        try:
-            vertices = np.load(os.path.join(source_dir, "vertices.npy"))
-            faces = np.load(os.path.join(source_dir, "faces.npy"))
-        except:
-            print(os.path.join(source_dir, "vertices.npy"))
-            import traceback
-            traceback.print_exc()
+        vertices = np.load(os.path.join(source_dir, "vertices.npy"))
+        faces = np.load(os.path.join(source_dir, "faces.npy"))
         return MeshProcessor(vertices,faces,ttype,source_dir, cpuonly=cpuonly, load_wks_samples=load_wks_samples, load_wks_centroids=load_wks_centroids, compute_splu=False)
 
     @staticmethod
@@ -161,7 +156,7 @@ class MeshProcessor:
         self.centroids.points_and_normals = np.hstack((np.mean(m.triangles, axis=1), m.face_normals))
         self.get_samples()# this is to compute WKS for centroids
 
-    def get_differential_operators(self):
+    def get_differential_operators(self, save=True):
         if self.diff_ops.grad is None:
             if not self.from_file:
                 try:
@@ -186,17 +181,21 @@ class MeshProcessor:
             raise Exception("FAILED load poisson on: {os.path.join(self.source_dir)}")
 
 
-    def load_differential_operators(self): 
+    def load_differential_operators(self):
         self.diff_ops.rhs = SparseMat.from_coo(load_npz(os.path.join(self.source_dir, 'new_rhs.npz')), ttype=torch.float64)
         self.diff_ops.grad = SparseMat.from_coo(load_npz(os.path.join(self.source_dir, 'new_grad.npz')), ttype=torch.float64)
         self.diff_ops.frames = np.load(os.path.join(self.source_dir, 'w.npy'))
         self.diff_ops.laplacian = SparseMat.from_coo(load_npz(os.path.join(self.source_dir, 'laplacian.npz')), ttype=torch.float64)
+        self.diff_ops.lap_pinned = np.load(os.path.join(self.source_dir, 'lap_pinned.npy'))
+        self.diff_ops.components = np.load(os.path.join(self.source_dir, 'components.npy'))
 
-    def save_differential_operators(self):  
+    def save_differential_operators(self):
         save_npz(os.path.join(self.source_dir, 'new_rhs.npz'), self.diff_ops.rhs.to_coo())
         save_npz(os.path.join(self.source_dir, 'new_grad.npz'), self.diff_ops.grad.to_coo())
         np.save(os.path.join(self.source_dir, 'w.npy'), self.diff_ops.frames)
         save_npz(os.path.join(self.source_dir, 'laplacian.npz'), self.diff_ops.laplacian.to_coo())
+        np.save(os.path.join(self.source_dir, 'lap_pinned.npy'), self.diff_ops.lap_pinned)
+        np.save(os.path.join(self.source_dir, 'components.npy'), self.diff_ops.components)
 
     def compute_differential_operators(self):
         '''
@@ -206,9 +205,10 @@ class MeshProcessor:
         self.diff_ops.grad = poisson_sys_mat.igl_grad
         self.diff_ops.rhs = poisson_sys_mat.rhs
         self.diff_ops.laplacian = poisson_sys_mat.lap
+        self.diff_ops.lap_pinned = poisson_sys_mat.lap_pinned
+        self.diff_ops.components = poisson_sys_mat.components
         self.diff_ops.frames = poisson_sys_mat.w
         self.diff_ops.poisson_sys_mat = poisson_sys_mat
-    
 
     def compute_poisson(self):
         poissonsolver = poissonbuilder.compute_poisson_solver_from_laplacian(compute_splu=self.compute_splu)
@@ -222,9 +222,16 @@ class MeshProcessor:
         diff_ops = self.get_differential_operators() # call 1
         ## WARNING : we commented these two lines because they seemed redundant.
         if self.diff_ops.poisson_sys_mat is None: # not created if loaded from disk the diff ops
-            diff_ops.poisson_sys_mat = PoissonSystemMatrices(self.vertices, self.faces, diff_ops.grad, diff_ops.rhs, diff_ops.frames, ttype, lap = diff_ops.laplacian,  cpuonly=self.cpuonly)
-        
+            diff_ops.poisson_sys_mat = PoissonSystemMatrices(self.vertices, self.faces, diff_ops.grad, diff_ops.rhs,
+                                                             diff_ops.frames, ttype, lap = diff_ops.laplacian,
+                                                             lap_pinned=diff_ops.lap_pinned, components=diff_ops.components,
+                                                             cpuonly=self.cpuonly)
+
         self.diff_ops.poisson_solver = diff_ops.poisson_sys_mat.create_poisson_solver() # call 2
+
+    def prepare_temporary_differential_operators(self,ttype):
+        self.compute_differential_operators()
+        self.diff_ops.poisson_solver = self.diff_ops.poisson_sys_mat.create_poisson_solver() # call 2
 
     def get_writeable(self):
         '''
@@ -252,7 +259,7 @@ class MeshProcessor:
             out_npz['lap_U'] = self.diff_ops.splu.U
             out_npz['lap'] = self.diff_ops.poisson.lap
         return {key: value for key, value in out_np.items() if value is not None}, {key: value for key, value in out_npz.items() if value is not None}
-        
+
     def get_data(self, key,file_type = 'npy'):
         if key == 'samples':
             return self.get_samples().xyz
@@ -394,7 +401,7 @@ class WaveKernelSignature:
                     L, self.top_k_eig, M, sigma=0, which='LM', maxiter=self.max_iter)
             except:
                 self.eig_vals, self.eig_vecs = scipy.sparse.linalg.eigsh(
-                    L, self.top_k_eig, M, sigma=1e-4, which='LM', maxiter=self.max_iter)                
+                    L, self.top_k_eig, M, sigma=1e-4, which='LM', maxiter=self.max_iter)
         except:
             raise WaveKernelSignatureError("Error in computing WKS")
 
@@ -440,7 +447,7 @@ class WaveKernelSignature:
             vmeshes[0].cmap(cmaps[0], scals).lighting('plastic')
 
             # add a 2D scalar bar to a mesh
-            vmeshes[0].addScalarBar(title=f"scalarbar #{0}", c='k') 
+            vmeshes[0].addScalarBar(title=f"scalarbar #{0}", c='k')
 
             vp.show(vmeshes, axes=1)
             screenshot(f"test_{time()}.png")
@@ -451,7 +458,7 @@ class WaveKernelSignature:
 
 
 
-        # range between biggest and smallest eigenvalue : 
+        # range between biggest and smallest eigenvalue :
         # 6 0.09622419080119388
         # 6_bis 0.09651935545457718
         delta = (np.log(self.eig_vals[-1]) - np.log(self.eig_vals[1])) / self.timestamps
@@ -461,7 +468,7 @@ class WaveKernelSignature:
         es = np.linspace(e_min, e_max, self.timestamps)  # T
         self.delta = delta
 
-        
+
         coef = np.expand_dims(es, 0) - np.expand_dims(np.log(self.eig_vals[1:]), 1)  # (K-1)xT
         coef = np.exp(-np.square(coef) / (2 * sigma * sigma))  # (K-1)xT #element wise square
         sum_coef = coef.sum(0)  # T
@@ -469,4 +476,4 @@ class WaveKernelSignature:
         self.wks = K / np.expand_dims(sum_coef, 0)  # VxT Scaling of the eigen vectors by sum_coef. Coef depends only on the eigen values. Triangulation agnostic.
         # print(np.linalg.norm(self.wks, axis=0))
         # print(np.linalg.norm(self.wks, axis=1))
-        
+

@@ -71,6 +71,14 @@ class DeformationDataset(Dataset):
         self.target = None
         self.star_is_initialized = False
 
+        # Store point dimension
+        # if args.layer_normalization == "FLATTEN":
+        #     self.point_dim = args.flat_channels
+        # if args.fft:
+        #     self.point_dim = 6 + 2 * args.fft_dim
+        # else:
+        #     self.point_dim = 6
+
     def initialize_star(self):
         # DEFINE GENERATOR FUNCTION FOR HUMANS
         from dataset_generation.human_db.star_generator import StarGenerator
@@ -152,7 +160,6 @@ class DeformationDataset(Dataset):
                 self.obj_to_npy(Path(join(self.directory, target)))
                 target_index[i] = target[:-4]
 
-        
         if Path(source_index).suffix  in [ '.obj' , '.off', '.ply']:
             self.obj_to_npy(Path(join(self.directory, source_index)))
             source_index = source_index[:-4]
@@ -165,13 +172,15 @@ class DeformationDataset(Dataset):
         if self.source is not None and self.unique_source:
             source = self.source
         else:
-            source = SourceMesh(source_index, join(self.directory, source_index), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks, random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly)
+            source = SourceMesh(source_index, join(self.directory, 'cache', source_index), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
+                                random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
+                                fft=self.args.fft, fft_dim=self.args.fft_dim, flatten=self.args.layer_normalization == "FLATTEN")
             source.load()
             self.source = source
 
         # ==================================================================
         # LOAD TARGET
-        target = BatchOfTargets(target_index, [join(self.directory, target_index[i]) for i in range(len(target_index))], self.target_keys, scales[False], self.ttype)
+        target = BatchOfTargets(target_index, [join(self.directory, 'cache', target_index[i]) for i in range(len(target_index))], self.target_keys, scales[False], self.ttype)
         target.load()
         return source, target
 
@@ -183,14 +192,17 @@ class DeformationDataset(Dataset):
 
     def obj_to_npy(self, path):
         from meshing.io import PolygonSoup
-        from meshing.mesh import Mesh 
-        directory_name = os.path.splitext(path)[0]
-        if not os.path.exists(join(directory_name , "vertices.npy")) and not  os.path.exists(join(directory_name, "faces.npy")):
-            os.makedirs(directory_name, exist_ok=True)
-            soup = PolygonSoup.from_obj(path) 
+        from meshing.mesh import Mesh
+        # NOTE: All mesh data should be saved into 'cache'
+        directory_name, basename = os.path.split(os.path.join(os.path.splitext(path)[0]))
+        directory = os.path.join(directory_name, "cache", basename)
+
+        if not os.path.exists(join(directory , "vertices.npy")) and not  os.path.exists(join(directory, "faces.npy")):
+            os.makedirs(directory, exist_ok=True)
+            soup = PolygonSoup.from_obj(path)
             mesh = Mesh(soup.vertices, soup.indices)
-            np.save(join(directory_name , "vertices.npy"), mesh.vertices)
-            np.save(join(directory_name , "faces.npy"), mesh.faces)
+            np.save(join(directory , "vertices.npy"), mesh.vertices)
+            np.save(join(directory , "faces.npy"), mesh.faces)
 
     def __getitem__(self,ind, verbose=False):
         start = time.time()
@@ -207,7 +219,7 @@ class DeformationDataset(Dataset):
         if verbose:
             print(f"DATALOADER : loaded sample in {time.time() - start}")
 
-        return data_sample 
+        return data_sample
     def get_point_dim(self):
         return self[0][0].get_point_dim()
 

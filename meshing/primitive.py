@@ -78,8 +78,8 @@ class Face(Primitive):
     def adjacentHalfedges(self):
         current = self.halfedge
         end = self.halfedge
-        # halfedges = [current, current.next, current.next.next] 
-        # return halfedges 
+        # halfedges = [current, current.next, current.next.next]
+        # return halfedges
         while True:
             he = current
             yield he
@@ -133,7 +133,7 @@ class Vertex(Primitive):
     def adjacentHalfedges(self):
         current = self.halfedge
         end = self.halfedge
-        # halfedges = [] 
+        # halfedges = []
         while True:
             he = current
             # halfedges.append(he)
@@ -142,7 +142,7 @@ class Vertex(Primitive):
             current = current.twin.next
             if current == end:
                 break
-        # return halfedges 
+        # return halfedges
 
     def adjacentVertices(self):
         # return [he.twin.vertex for he in self.adjacentHalfedges()]

@@ -7,7 +7,7 @@ import args_from_cli
 class UVExperiment(Experiment):
     def __init__(self, cpuonly=False):
         self.cpuonly = cpuonly
-        Experiment.__init__(self, "UVExperiment", 'Use NJF to predict UVs and supervise using distortion losses from DA Wand', cpuonly=cpuonly)
+        Experiment.__init__(self, "Cylinder_NoInit", 'Use NJF to predict UVs and supervise using distortion losses from DA Wand', cpuonly=cpuonly)
 
     def init_encoder(self, encoder, args):
         # TODO: might not need pointnet conditioning for generalizability -- depends on what kind of message passing rest of NJF does
@@ -20,7 +20,7 @@ if __name__ == '__main__':
     sys.argv.append("--root_dir_test")
     sys.argv.append("./data/cylinder")
     sys.argv.append("--expname")
-    sys.argv.append("UVExperiment")
+    sys.argv.append("Cylinder_NoInit")
 
     sys.argv.append("--experiment_type")
     sys.argv.append("DEFAULT")
@@ -46,19 +46,19 @@ if __name__ == '__main__':
     sys.argv.append("1")
 
     # Initialization
-    sys.argv.append("--identity")
-    sys.argv.append("--init")
-    sys.argv.append("tutte")
+    # sys.argv.append("--identity")
+    # sys.argv.append("--init")
+    # sys.argv.append("tutte")
 
     # Loss settings
     sys.argv.append("--no_poisson")
     sys.argv.append("--lossdistortion")
     sys.argv.append("dirichlet")
-    sys.argv.append("--lossedgeseparation")
-    sys.argv.append("--seplossdelta")
-    sys.argv.append("0.01")
-    sys.argv.append("--seplossweight")
-    sys.argv.append("1")
+    # sys.argv.append("--lossedgeseparation")
+    # sys.argv.append("--seplossdelta")
+    # sys.argv.append("0.01")
+    # sys.argv.append("--seplossweight")
+    # sys.argv.append("1")
 
     sys.argv.append("--targets_per_batch")
     sys.argv.append("16")

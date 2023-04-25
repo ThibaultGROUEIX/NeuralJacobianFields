@@ -46,7 +46,7 @@ if __name__ == '__main__':
     sys.argv.append("1")
 
     # Initialization
-    sys.argv.append("--identity")
+    # sys.argv.append("--identity")
     sys.argv.append("--init")
     sys.argv.append("tutte")
 
@@ -54,11 +54,11 @@ if __name__ == '__main__':
     sys.argv.append("--no_poisson")
     sys.argv.append("--lossdistortion")
     sys.argv.append("dirichlet")
-    sys.argv.append("--lossedgeseparation")
-    sys.argv.append("--seplossdelta")
-    sys.argv.append("0.01")
-    sys.argv.append("--seplossweight")
-    sys.argv.append("1")
+    # sys.argv.append("--lossedgeseparation")
+    # sys.argv.append("--seplossdelta")
+    # sys.argv.append("0.01")
+    # sys.argv.append("--seplossweight")
+    # sys.argv.append("1")
 
     sys.argv.append("--targets_per_batch")
     sys.argv.append("16")

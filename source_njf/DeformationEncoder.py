@@ -102,7 +102,7 @@ class DeformationEncoder(torch.nn.Module):
             self.__keys_to_load[source_or_target][key] = True
         self.__generators[source_or_target].append(generator)
         self.__module_list.append(generator)
-        
+
     def add_pointnet(self,code_length:int,source :bool,target:bool):
         '''
         Add a pointnet encoder
@@ -118,6 +118,17 @@ class DeformationEncoder(torch.nn.Module):
         #     encoder = _PointNetEncoder(code_length,use_normals = not self.__args.no_pointnet_normals,use_wks  = not self.__args.no_wks,  normalization=normalization)
         # else:
         encoder = _PointNetEncoder(code_length, normalization=self.__args.pointnet_layer_normalization, use_wks = not self.__args.no_wks, use_normals= not self.__args.no_pointnet_normals)
+
+        # TODO: ask Noam if freezing the encoder is correct...
+        encoder.requires_grad = False
+        encoder.eval()
+
+        encoder._PointNetEncoder__pointnet.requires_grad = False
+        encoder._PointNetEncoder__pointnet.eval()
+
+        for param in encoder._PointNetEncoder__pointnet.parameters():
+            param.requires_grad = False
+
         if self.__ttype is not None:
             encoder.type(self.type())
         to_add = []
@@ -138,7 +149,7 @@ class DeformationEncoder(torch.nn.Module):
         '''
         gem = _LoadedDataEncoder(field_name)
         self.__add_generator(source_or_target, gem)
-        
+
     def get_keys_to_load(self,source_or_target:bool):
         '''
         get all keys that are needed to load from disk
@@ -173,6 +184,7 @@ class DeformationEncoder(torch.nn.Module):
         ret = torch.cat(codes, dim=1)
         assert(ret.shape[0] == codes[0].shape[0])
         return ret
+    # NOTE: Pointnet encoding HERE
     def encode_deformation(self, source,target):
         '''
         get the code for the deformations in a batch
@@ -197,6 +209,9 @@ class DeformationEncoder(torch.nn.Module):
         :param dataset: Dataset object that returns batches
         :return: integer specifying code lenth
         '''
+        if self.__args.layer_normalization == "FLATTEN":
+            return 0
+
         b = dataset[0]
 
         c = self.encode_deformation(b[0],b[1])
