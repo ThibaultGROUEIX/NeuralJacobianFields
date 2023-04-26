@@ -382,52 +382,58 @@ class MyNet(pl.LightningModule):
                 self.log(f"val_{key}", np.sum(val), logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
 
         # Log path
-        save_path = self.logger.save_dir
-        val_loss = batch_parts['loss'].item()
+        source, target = batch
+        sourcename = os.path.basename(source.source_dir)
+        source_path = os.path.join(self.logger.save_dir, "renders", sourcename)
+        save_path = os.path.join(self.logger.save_dir, "renders", sourcename, "frames")
+
+        if not os.path.exists(save_path):
+            Path(save_path).mkdir(exist_ok=True, parents=True)
 
         # Save latest predictions
-        np.save(os.path.join(save_path, f"preduv_{idx}.npy"), ret['pred_V'].squeeze().detach().cpu().numpy())
-        np.save(os.path.join(save_path, f"predt_{idx}.npy"), ret['T'])
+        np.save(os.path.join(source_path, f"latest_preduv.npy"), batch_parts['pred_V'].squeeze().detach().cpu().numpy())
+        np.save(os.path.join(source_path, f"latest_predt.npy"), batch_parts['T'])
 
-        if args.no_poisson:
-            np.save(os.path.join(save_path, f"poissonuv_{idx}.npy"), ret['poissonUV'].squeeze().detach().cpu().numpy())
-            np.save(os.path.join(save_path, f"poissont_{idx}.npy"), ret['ogT']) # NOTE: poisson T uses original triangles!
+        if self.args.no_poisson:
+            np.save(os.path.join(source_path, f"latest_poissonuv.npy"), batch_parts['poissonUV'].squeeze().detach().cpu().numpy())
+            np.save(os.path.join(source_path, f"latest_poissont.npy"), batch_parts['ogT']) # NOTE: poisson T uses original triangles!
 
+        val_loss = batch_parts['loss'].item()
         if self.args.xp_type == "uv":
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
-                    plot_uv(os.path.join(save_path, 'frames'), f"epoch {self.global_step:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().numpy(),
+                    plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().numpy(),
                             batch_parts["T"][idx].squeeze(), losses=lossdict[idx], ftoe=ftoe)
             else:
-                plot_uv(os.path.join(save_path, 'frames'), f"epoch {self.global_step:05}", batch_parts["pred_V"].squeeze().detach().numpy(),
+                plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().numpy(),
                         batch_parts["T"].squeeze(), losses=lossdict[0], ftoe=ftoe)
 
             # Log the plotted imgs
-            images = [os.path.join(save_path, 'frames', f"epoch_{self.global_step:05}.png")] + \
-                        [os.path.join(save_path, 'frames', f"{key}_epoch_{self.global_step:05}.png") for key in lossdict[0].keys() if "loss" in key]
-            self.logger.log_image(key='uvs', images=images, step=self.global_step)
+            images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
+                        [os.path.join(save_path, f"{key}_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+            self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
 
             # Postprocess stitch
             # if self.args.lossgradientstitching:
-            #     plot_uv(os.path.join(save_path, 'frames'), f"gradstitch epoch {self.global_step:05}", batch_parts["stitchV"],
+            #     plot_uv(save_path, f"gradstitch epoch {self.current_epoch:05}", batch_parts["stitchV"],
             #             batch_parts["stitchT"].squeeze(), losses={'distortionloss': batch_parts['stitchDistortion'],
             #                                                       'stitchdistortionloss': batch_parts['stitchDistortion'],
             #                                                       'edgegradloss': lossdict[0]['edgegradloss']})
-            #     images = [os.path.join(save_path, 'frames', f"gradstitch_epoch_{self.global_step:05}.png")] + \
-            #                 [os.path.join(save_path, 'frames', f"{key}_gradstitch_epoch_{self.global_step:05}.png") for key in ['distortionloss', 'stitchdistortionloss', 'edgegradloss']]
-            #     self.logger.log_image(key='uvs', images=images, step=self.global_step)
+            #     images = [os.path.join(save_path, 'frames', f"gradstitch_epoch_{self.current_epoch:05}.png")] + \
+            #                 [os.path.join(save_path, 'frames', f"{key}_gradstitch_epoch_{self.current_epoch:05}.png") for key in ['distortionloss', 'stitchdistortionloss', 'edgegradloss']]
+            #     self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
             for key, val in lossdict[0].items():
                 if "loss" in key: # Hacky way of avoiding aggregated values
                     if "edge" in key:
                         ftoeloss = np.array([np.sum(val[es]) for es in ftoe])
-                        export_views(mesh, os.path.join(save_path, 'frames'), filename=f"{key}_mesh_{self.global_step:05}.png",
+                        export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(ftoeloss):0.4f}",
                                     fcolor_vals=ftoeloss, device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=0.3)
                     else:
-                        export_views(mesh, os.path.join(save_path, 'frames'), filename=f"{key}_mesh_{self.global_step:05}.png",
+                        export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(val):0.4f}",
                                     fcolor_vals=val, device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=0.6)
@@ -435,14 +441,15 @@ class MyNet(pl.LightningModule):
             ## Poisson values
             # Check poisson UVs (true UV)
             if "poissonUV" in batch_parts.keys():
-                plot_uv(os.path.join(save_path, 'frames'), f"poisson epoch {self.global_step:05}", batch_parts["poissonUV"].squeeze().detach().numpy(),
+                plot_uv(save_path, f"poisson epoch {self.current_epoch:05}", batch_parts["poissonUV"].squeeze().detach().numpy(),
                         batch_parts["ogT"].squeeze(), losses={'distortionloss': batch_parts['poissonDistortion']})
 
-                images = [os.path.join(save_path, 'frames', f"poisson_epoch_{self.global_step:05}.png"), os.path.join(save_path, 'frames', f"distortionloss_poisson_epoch_{self.global_step:05}.png")]
-                self.logger.log_image(key='poisson uvs', images=images, step=self.global_step)
+                images = [os.path.join(save_path, f"poisson_epoch_{self.current_epoch:05}.png"),
+                          os.path.join(save_path, f"distortionloss_poisson_epoch_{self.current_epoch:05}.png")]
+                self.logger.log_image(key='poisson uvs', images=images, step=self.current_epoch)
 
 
-            export_views(mesh, os.path.join(save_path, 'frames'), filename=f"poisson_mesh_{self.global_step:05}.png",
+            export_views(mesh, save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
                         plotname=f"Poisson Distortion Loss: {np.sum(batch_parts['poissonDistortion']):0.4f}",
                         fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
                         vmin=0, vmax=0.6)
@@ -461,7 +468,7 @@ class MyNet(pl.LightningModule):
             #                 vcut_vals.append(0)
             #     vcut_vals = np.array(vcut_vals)
 
-            #     export_views(mesh, os.path.join(save_path, 'frames'), filename=f"stitch_mesh_{self.global_step:05}.png",
+            #     export_views(mesh, save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
             #                 plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
             #                 vcolor_vals= vcut_vals, device="cpu", n_sample=25, width=200, height=200,
             #                 vmin=0, vmax=1, outline_width=0)
@@ -961,7 +968,6 @@ def main(gen, args):
         from utils import clear_directory
         clear_directory(save_path)
     Path(save_path).mkdir(exist_ok=True, parents=True)
-    Path(os.path.join(save_path, 'frames')).mkdir(exist_ok=True, parents=True)
 
     if not args.compute_human_data_on_the_fly:
         ### DEFAULT GOES HERE ###
@@ -1133,25 +1139,31 @@ def main(gen, args):
     # Save UVs
     for idx, data in enumerate(train_loader):
         ret = model.my_step(data, idx, validation=True)
-        np.save(os.path.join(save_path, f"preduv_{idx}.npy"), ret['pred_V'].squeeze().detach().cpu().numpy())
-        np.save(os.path.join(save_path, f"predt_{idx}.npy"), ret['T'])
+        source, target = data
+        sourcepath = source.source_dir
+        np.save(os.path.join(sourcepath, f"latest_preduv.npy"), ret['pred_V'].squeeze().detach().cpu().numpy())
+        np.save(os.path.join(sourcepath, f"latest_predt.npy"), ret['T'])
 
         if args.no_poisson:
-            np.save(os.path.join(save_path, f"poissonuv_{idx}.npy"), ret['poissonUV'].squeeze().detach().cpu().numpy())
-            np.save(os.path.join(save_path, f"poissont_{idx}.npy"), ret['ogT']) # NOTE: poisson T uses original triangles!
+            np.save(os.path.join(sourcepath, f"latest_poissonuv.npy"), ret['poissonUV'].squeeze().detach().cpu().numpy())
+            np.save(os.path.join(sourcepath, f"latest_poissont.npy"), ret['ogT']) # NOTE: poisson T uses original triangles!
 
-    # Generate gif of training process
+    ### GENERATE GIFS
     pref = ""
     # if args.lossgradientstitching:
     #     pref = "gradstitch_"
 
-    if args.xp_type == "uv":
-        from PIL import Image
-        import glob
-        import re
+    from PIL import Image
+    import glob
+    import re
+    for batchi, batch in enumerate(train_loader):
+        source, target = batch
+        sourcename = os.path.basename(source.source_dir)
+        vispath = os.path.join(save_path, "renders", sourcename)
+
         ## Default UV gif
-        fp_in = f"{os.path.join(save_path, 'frames')}/{pref}epoch_*.png"
-        fp_out = f"{save_path}/{pref}train.gif"
+        fp_in = f"{vispath}/frames/{pref}epoch_*.png"
+        fp_out = f"{vispath}/{pref}train.gif"
         imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
 
         # Resize images
@@ -1171,8 +1183,8 @@ def main(gen, args):
         for key in lossnames:
             if "loss" in key:
                 # Embedding viz
-                fp_in = f"{os.path.join(save_path, 'frames')}/{key}_{pref}epoch_*.png"
-                fp_out = f"{save_path}/train_{pref}{key}.gif"
+                fp_in = f"{vispath}/frames/{key}_{pref}epoch_*.png"
+                fp_out = f"{vispath}/train_{pref}{key}.gif"
                 imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
                 # Resize images
@@ -1185,8 +1197,8 @@ def main(gen, args):
                         save_all=True, duration=100, loop=0, disposal=2)
 
                 # Mesh viz
-                fp_in = f"{os.path.join(save_path, 'frames')}/{key}_mesh_*.png"
-                fp_out = f"{save_path}/train_{key}_mesh.gif"
+                fp_in = f"{vispath}/frames/{key}_mesh_*.png"
+                fp_out = f"{vispath}/train_{key}_mesh.gif"
                 imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
                 # Resize images
@@ -1201,7 +1213,7 @@ def main(gen, args):
         # Stitching
         # if args.lossgradientstitching:
         #     # Base
-        #     fp_in = f"{os.path.join(save_path, 'frames')}/stitch_mesh_*.png"
+        #     fp_in = f"{save_path}/stitch_mesh_*.png"
         #     fp_out = f"{save_path}/stitch_mesh.gif"
         #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
 
@@ -1216,8 +1228,8 @@ def main(gen, args):
         ## Poisson solve
         if args.no_poisson:
             # Base
-            fp_in = f"{os.path.join(save_path, 'frames')}/poisson_epoch_*.png"
-            fp_out = f"{save_path}/train_poisson.gif"
+            fp_in = f"{vispath}/frames/poisson_epoch_*.png"
+            fp_out = f"{vispath}/train_poisson.gif"
             imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
 
             # Resize images
@@ -1229,8 +1241,8 @@ def main(gen, args):
                     save_all=True, duration=100, loop=0, disposal=2)
 
             # Embedding distortion
-            fp_in = f"{os.path.join(save_path, 'frames')}/distortionloss_poisson_epoch_*.png"
-            fp_out = f"{save_path}/train_poisson_distortionloss.gif"
+            fp_in = f"{vispath}/frames/distortionloss_poisson_epoch_*.png"
+            fp_out = f"{vispath}/train_poisson_distortionloss.gif"
             imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
             # Resize images
@@ -1242,8 +1254,8 @@ def main(gen, args):
                     save_all=True, duration=100, loop=0, disposal=2)
 
             # Mesh distortion
-            fp_in = f"{os.path.join(save_path, 'frames')}/poisson_mesh_*.png"
-            fp_out = f"{save_path}/train_poisson_mesh.gif"
+            fp_in = f"{vispath}/frames/poisson_mesh_*.png"
+            fp_out = f"{vispath}/train_poisson_mesh.gif"
             imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
             # Resize images

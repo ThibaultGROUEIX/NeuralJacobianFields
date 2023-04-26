@@ -163,12 +163,12 @@ class DeformationDataset(Dataset):
         source_index ,target_index = self.source_and_target[ind]
         for i,target in enumerate(target_index):
             if Path(target).suffix in [ '.obj' , '.off', '.ply']:
-                # NOTE: Below caches the vertices/faces
+                # NOTE: Below caches the vertices/faces + creates the directory
                 self.obj_to_npy(Path(join(self.directory, target)), ind)
                 target_index[i] = target[:-4]
 
         if Path(source_index).suffix  in [ '.obj' , '.off', '.ply']:
-            # NOTE: Below caches the vertices/faces
+            # NOTE: Below caches the vertices/faces + creates the directory
             self.obj_to_npy(Path(join(self.directory, source_index)), ind)
             source_index = source_index[:-4]
 
