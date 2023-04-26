@@ -52,14 +52,20 @@ class DeformationDataset(Dataset):
                 source_target[s] = []
             source_target[s].append(t)
         # print(f"ellapsed {time.time() -st}")
-        if len(source_target) == 1:
+        if len(source_target) == 1 and not (args.init == "isometric" and args.ninit > 1):
             # This flag will avoid reloading the source at each iteration, since the source is always the same.
             self.unique_source = True
         self.source_and_target = []
+        # TODO: duplicate source for however many initializations we need
         for s,ts in source_target.items():
             chunks = np.split(ts, np.arange(args.targets_per_batch,len(ts),args.targets_per_batch))
-            for chunk in chunks:
-                self.source_and_target.append((s,chunk))
+            if args.init == "isometric":
+                for _ in range(args.ninit):
+                    for chunk in chunks:
+                        self.source_and_target.append((s,chunk))
+            else:
+                for chunk in chunks:
+                    self.source_and_target.append((s,chunk))
 
         self.source_keys = source_keys
         self.s_and_t = s_and_t
@@ -157,11 +163,13 @@ class DeformationDataset(Dataset):
         source_index ,target_index = self.source_and_target[ind]
         for i,target in enumerate(target_index):
             if Path(target).suffix in [ '.obj' , '.off', '.ply']:
-                self.obj_to_npy(Path(join(self.directory, target)))
+                # NOTE: Below caches the vertices/faces
+                self.obj_to_npy(Path(join(self.directory, target)), ind)
                 target_index[i] = target[:-4]
 
         if Path(source_index).suffix  in [ '.obj' , '.off', '.ply']:
-            self.obj_to_npy(Path(join(self.directory, source_index)))
+            # NOTE: Below caches the vertices/faces
+            self.obj_to_npy(Path(join(self.directory, source_index)), ind)
             source_index = source_index[:-4]
 
         # print(source_index, target_index)
@@ -172,7 +180,7 @@ class DeformationDataset(Dataset):
         if self.source is not None and self.unique_source:
             source = self.source
         else:
-            source = SourceMesh(source_index, join(self.directory, 'cache', source_index), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
+            source = SourceMesh(source_index, join(self.directory, 'cache', f"{source_index}_{ind}"), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
                                 random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
                                 fft=self.args.fft, fft_dim=self.args.fft_dim, flatten=self.args.layer_normalization == "FLATTEN")
             source.load()
@@ -190,12 +198,12 @@ class DeformationDataset(Dataset):
             exist = (exist and path.is_file())
         return exist
 
-    def obj_to_npy(self, path):
+    def obj_to_npy(self, path, ind):
         from meshing.io import PolygonSoup
         from meshing.mesh import Mesh
         # NOTE: All mesh data should be saved into 'cache'
         directory_name, basename = os.path.split(os.path.join(os.path.splitext(path)[0]))
-        directory = os.path.join(directory_name, "cache", basename)
+        directory = os.path.join(directory_name, "cache", f"{basename}_{ind}")
 
         if not os.path.exists(join(directory , "vertices.npy")) and not  os.path.exists(join(directory, "faces.npy")):
             os.makedirs(directory, exist_ok=True)

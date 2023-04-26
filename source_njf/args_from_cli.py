@@ -47,6 +47,7 @@ def get_arg_parser():
 	parser.add_argument("--identity", help='initialize network from identity', action="store_true")
 	parser.add_argument("--globaltrans", help='also predict global translation per shape code', action="store_true")
 	parser.add_argument("--init", choices={"tutte", "isometric"}, help="initialize 2D embedding", default=None, type=str)
+	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization")
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
 						action="store_true")
 	parser.add_argument("--no_poisson", help="no poisson solve", action="store_true")

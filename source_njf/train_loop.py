@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 #defines the network and the train loop
 import warnings
 
@@ -1254,3 +1255,5 @@ def main(gen, args):
             imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
                     save_all=True, duration=100, loop=0, disposal=2)
     # ================ #
+=======
+>>>>>>> 79bd142c8daf006ac430c708233adf70ee6ca3a2
