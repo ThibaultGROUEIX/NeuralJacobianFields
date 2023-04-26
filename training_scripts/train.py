@@ -25,4 +25,9 @@ if __name__ == '__main__':
     exp = UVExperiment(args.expname)
     exp.get_args_and_train(args)
 
+    # Wandb prune cache
+    import wandb
+    c = wandb.wandb_sdk.wandb_artifacts.get_artifacts_cache()
+    c.cleanup(int(10e9))
+
 #

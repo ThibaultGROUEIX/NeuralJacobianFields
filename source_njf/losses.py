@@ -286,7 +286,7 @@ def splitgradloss(vs, fs, uv, cosine_weight=1, mag_weight=1):
     elens = torch.tensor(elens, device=uv.device)
 
     cosine_loss = -torch.nn.functional.cosine_similarity(e0, e1)
-    mag_loss = torch.nn.functional.mse_loss(torch.norm(e0, dim=1), torch.norm(e1, dim=1), reduction='none')
+    mag_loss = torch.nn.functional.mse_loss(torch.norm(e0, dim=1)/elens, torch.norm(e1, dim=1)/elens, reduction='none')
 
     return elens * (cosine_weight * cosine_loss + mag_weight * mag_loss)
 

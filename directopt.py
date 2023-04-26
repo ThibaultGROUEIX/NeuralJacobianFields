@@ -33,6 +33,7 @@ parser.add_argument("--lr",
 parser.add_argument("--grad", choices={'l2', 'split'},
                     help='whether to use gradient stitching energy instead of standard edge separation (will still optimize translation with edge separation)',
                     default=None)
+parser.add_argument("--gradrelax", action="store_true")
 parser.add_argument("--overwrite", action="store_true")
 parser.add_argument("--continuetrain", action="store_true")
 parser.add_argument("--anneal", action="store_true")
@@ -72,7 +73,9 @@ if args.continuetrain:
         predtrans.requires_grad_()
 
         # Load optimizer and scheduler states
-        optimizer = torch.optim.Adam([predj, predtrans], lr=args.lr)
+        optimizer = torch.optim.Adam([predj], lr=args.lr)
+        optimizer.add_param_group({"params": [predtrans], 'lr': args.lr})
+
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=500, min_lr=1e-7,
                                                             factor=0.5,
                                                             threshold=0.0001, verbose=True)
@@ -90,7 +93,9 @@ if not LOADED_STATE:
     predj.requires_grad_()
     predtrans = torch.zeros((len(init), 2)).to(device).float()
     predtrans.requires_grad_()
-    optimizer = torch.optim.Adam([predj, predtrans], lr=args.lr)
+    optimizer = torch.optim.Adam([predj], lr=args.lr)
+    optimizer.add_param_group({"params": [predtrans], 'lr': args.lr})
+
     # NOTE: Patience must be smaller than the cosine schedule!
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=500, min_lr=1e-7,
                                                         factor=0.5,
@@ -135,11 +140,13 @@ for i in (pbar := tqdm(range(START_EPOCH, NUM_EPOCHS))):
     if args.grad == "l2":
         gradloss = torch.sum(uvgradloss(vertices, faces, pred_V), dim=1)
         edgeloss = torch.sum(uvseparation(vertices, faces, pred_V.detach() + predtrans.unsqueeze(1), loss='l2'), dim=[1,2])
-        edgeloss = edgeloss * edgeloss/(edgeloss * edgeloss + CURRENT_DELTA)
+        if args.gradrelax:
+            edgeloss = edgeloss * edgeloss/(edgeloss * edgeloss + CURRENT_DELTA)
     elif args.grad == 'split':
         gradloss = splitgradloss(vertices, faces, pred_V)
         edgeloss = torch.sum(uvseparation(vertices, faces, pred_V.detach() + predtrans.unsqueeze(1), loss='l2'), dim=[1,2])
-        edgeloss = edgeloss * edgeloss/(edgeloss * edgeloss + CURRENT_DELTA)
+        if args.gradrelax:
+            edgeloss = edgeloss * edgeloss/(edgeloss * edgeloss + CURRENT_DELTA)
     else:
         pred_V += predtrans.unsqueeze(1)
         edgeloss = uvseparation(vertices, faces, pred_V)

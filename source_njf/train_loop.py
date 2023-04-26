@@ -282,7 +282,7 @@ class MyNet(pl.LightningModule):
             if "loss" in key:
                 self.log(key, np.sum(val), logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
 
-        if self.args.mem:
+        if self.args.debug:
             # Check memory consumption
             # Get GPU memory usage
             t = torch.cuda.get_device_properties(0).total_memory
@@ -383,8 +383,16 @@ class MyNet(pl.LightningModule):
 
         # Log path
         save_path = self.logger.save_dir
-
         val_loss = batch_parts['loss'].item()
+
+        # Save latest predictions
+        np.save(os.path.join(save_path, f"preduv_{idx}.npy"), ret['pred_V'].squeeze().detach().cpu().numpy())
+        np.save(os.path.join(save_path, f"predt_{idx}.npy"), ret['T'])
+
+        if args.no_poisson:
+            np.save(os.path.join(save_path, f"poissonuv_{idx}.npy"), ret['poissonUV'].squeeze().detach().cpu().numpy())
+            np.save(os.path.join(save_path, f"poissont_{idx}.npy"), ret['ogT']) # NOTE: poisson T uses original triangles!
+
         if self.args.xp_type == "uv":
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
@@ -896,10 +904,10 @@ class MyNet(pl.LightningModule):
                 init_translate = torch.ones(faces.shape[0], 1, 2).to(self.device).float() * 0.5
                 init_translate.requires_grad_()
                 additional_parameters = [init_translate]
-                optimizer.add_param_group({"params": additional_parameters, 'lr': 1e-6})
+                optimizer.add_param_group({"params": additional_parameters, 'lr': self.lr * 100}) # Direct optimization needs to be 100x larger
 
                 # HACK: Need to also extend scheduler's min_lrs
-                scheduler1.min_lrs.append(1e-8)
+                scheduler1.min_lrs.append(1e-5)
 
         return {"optimizer": optimizer,
                 "lr_scheduler": {
@@ -1007,12 +1015,15 @@ def main(gen, args):
     id = None
     if args.continuetrain:
         import re
-        for idfile in os.listdir(os.path.join('outputs', args.expname, 'wandb', 'latest-run')):
-            if idfile.endswith(".wandb"):
-                result = re.search(r'run-([a-zA-Z0-9]+)', idfile)
-                if result is not None:
-                    id = result.group(1)
-                    break
+        if os.path.exists(os.path.join('outputs', args.expname, 'wandb', 'latest-run')):
+            for idfile in os.listdir(os.path.join('outputs', args.expname, 'wandb', 'latest-run')):
+                if idfile.endswith(".wandb"):
+                    result = re.search(r'run-([a-zA-Z0-9]+)', idfile)
+                    if result is not None:
+                        id = result.group(1)
+                        break
+        else:
+            print(f"Warning: No wandb record found in {os.path.join('outputs', args.expname, 'wandb', 'latest-run')}!. Starting log from scratch...")
 
     logger = WandbLogger(project='njfwand', name=args.expname, save_dir=os.path.join("outputs", args.expname), log_model='all' if not args.debug else False,
                          offline=args.debug, resume='must' if args.continuetrain and id is not None else 'allow', id = id)
