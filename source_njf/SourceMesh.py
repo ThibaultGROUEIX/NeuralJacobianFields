@@ -124,33 +124,50 @@ class SourceMesh:
         if self.flatten:
             self.flat_vector = torch.rand(1, len(self.mesh_processor.faces) * 9) * 100
 
+        # First check if initialization cached
+
         # Precompute Tutte if set
         if self.init == "tutte":
-            from utils import tutte_embedding, get_local_tris
+            if os.path.exists(os.path.join(self.source_dir, "tuttefuv.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "tutteuv.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "tuttej.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "tuttetranslate.pt")):
+                self.tuttefuv = torch.load(os.path.join(self.source_dir, "tuttefuv.pt"))
+                self.tutteuv = torch.load(os.path.join(self.source_dir, "tutteuv.pt"))
+                self.tuttej = torch.load(os.path.join(self.source_dir, "tuttej.pt"))
+                self.tuttetranslate = torch.load(os.path.join(self.source_dir, "tuttetranslate.pt"))
+            else:
+                from utils import tutte_embedding, get_local_tris
 
-            vertices = self.source_vertices
-            device = vertices.device
-            faces = self.get_source_triangles()
-            fverts = vertices[faces].transpose(1,2)
+                vertices = self.source_vertices
+                device = vertices.device
+                faces = self.get_source_triangles()
+                fverts = vertices[faces].transpose(1,2)
 
-            self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), self.get_source_triangles(), fixclosed=True)).unsqueeze(0) # 1 x F x 2
+                self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), self.get_source_triangles(), fixclosed=True)).unsqueeze(0) # 1 x F x 2
 
-            # Convert Tutte to 3-dim
-            self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
+                # Convert Tutte to 3-dim
+                self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
 
-            # Get Jacobians
-            self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
+                # Get Jacobians
+                self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
 
-            # DEBUG: make sure we can get back the original UVs up to global translation
-            pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
-            checktutte = self.tutteuv[0,faces,:2]
-            diff = pred_V - checktutte
-            diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
-            torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+                # DEBUG: make sure we can get back the original UVs up to global translation
+                pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
+                checktutte = self.tutteuv[0,faces,:2]
+                diff = pred_V - checktutte
+                diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
+                torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
 
-            ## Save the global translations
-            self.tuttetranslate = (checktutte - pred_V)[:,:,:2]
-            self.tuttefuv = self.tutteuv[:,faces,:2] # B x F x 3 x 2
+                ## Save the global translations
+                self.tuttetranslate = (checktutte - pred_V)[:,:,:2]
+                self.tuttefuv = self.tutteuv[:,faces,:2] # B x F x 3 x 2
+
+                # Cache everything
+                torch.save(self.tuttefuv, os.path.join(self.source_dir, "tuttefuv.pt"))
+                torch.save(self.tutteuv, os.path.join(self.source_dir, "tutteuv.pt"))
+                torch.save(self.tuttej, os.path.join(self.source_dir, "tuttej.pt"))
+                torch.load(self.tuttetranslate, os.path.join(self.source_dir, "tuttetranslate.pt"))
 
             ## Store in loaded data so it gets mapped to device
             # Remove extraneous dimension
@@ -171,45 +188,58 @@ class SourceMesh:
             # plt.close(fig)
             # plt.cla()
         elif self.init == "isometric":
-            from utils import get_local_tris
+            if os.path.exists(os.path.join(self.source_dir, "isofuv.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "isoj.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "isotranslate.pt")):
 
-            vertices = self.source_vertices
-            device = vertices.device
-            faces = self.get_source_triangles()
-            fverts = vertices[faces]
+                self.isofuv = torch.load(os.path.join(self.source_dir, "isofuv.pt"))
+                self.isoj = torch.load(os.path.join(self.source_dir, "isoj.pt"))
+                self.isotranslate = torch.load(os.path.join(self.source_dir, "isotranslate.pt"))
+            else:
+                from utils import get_local_tris
 
-            local_tris = get_local_tris(vertices, faces) # F x 3 x 2
+                vertices = self.source_vertices
+                device = vertices.device
+                faces = self.get_source_triangles()
+                fverts = vertices[faces]
 
-            # Randomly sample displacements
-            # NOTE: might need to alter the scales here
-            self.isofuv = local_tris + np.random.uniform(size=(local_tris.shape[0], 1, local_tris.shape[2])) # F x 3 x 2
+                local_tris = get_local_tris(vertices, faces) # F x 3 x 2
 
-            #### Get jacobians using gradient operator per triangle
-            from igl import grad
+                # Randomly sample displacements
+                # NOTE: might need to alter the scales here
+                self.isofuv = local_tris + np.random.uniform(size=(local_tris.shape[0], 1, local_tris.shape[2])) # F x 3 x 2
 
-            # Gradient operator (F*3 x V)
-            # NOTE: need to compute this separately per triangle b/c of soup
-            from scipy.sparse import bmat
-            G = []
-            for i in range(len(faces)):
-                G.append(grad(fverts[i].detach().cpu().numpy(), np.arange(3).reshape(1,3)))
-            # Create massive sparse block diagonal matrix
-            G = bmat([[None for _ in range(i)] + [G[i]] + [None for _ in range(i+1, len(G))] for i in range(len(G))])
+                #### Get jacobians using gradient operator per triangle
+                from igl import grad
 
-            # Convert local tris to soup
-            isosoup = self.isofuv.reshape(-1, 2).detach().cpu().numpy() # V x 2
+                # Gradient operator (F*3 x V)
+                # NOTE: need to compute this separately per triangle b/c of soup
+                from scipy.sparse import bmat
+                G = []
+                for i in range(len(faces)):
+                    G.append(grad(fverts[i].detach().cpu().numpy(), np.arange(3).reshape(1,3)))
+                # Create massive sparse block diagonal matrix
+                G = bmat([[None for _ in range(i)] + [G[i]] + [None for _ in range(i+1, len(G))] for i in range(len(G))])
 
-            # Get Jacobians
-            self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1)
+                # Convert local tris to soup
+                isosoup = self.isofuv.reshape(-1, 2).detach().cpu().numpy() # V x 2
 
-            # DEBUG: make sure we can get back the original UVs up to global translation
-            pred_V = torch.einsum("abc,acd->abd", (fverts, self.isoj.transpose(2,1)))
-            diff = pred_V - self.isofuv
-            diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle global translation
-            torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+                # Get Jacobians
+                self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1)
 
-            ## Save the global translations
-            self.isotranslate = self.isofuv - pred_V
+                ## Debugging: make sure we can get back the original UVs up to global translation
+                pred_V = torch.einsum("abc,acd->abd", (fverts, self.isoj.transpose(2,1)))
+                diff = pred_V - self.isofuv
+                diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle global translation
+                torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+
+                ## Save the global translations
+                self.isotranslate = self.isofuv - pred_V
+
+                # Cache everything
+                torch.save(self.isofuv, os.path.join(self.source_dir, "isofuv.pt"))
+                torch.save(self.isoj, os.path.join(self.source_dir, "isoj.pt"))
+                torch.save(self.isotranslate, os.path.join(self.source_dir, "isotranslate.pt"))
 
             ## Store in loaded data so it gets mapped to device
             # NOTE: need to transpose isoj to interpret as 2x3
