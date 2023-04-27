@@ -320,6 +320,39 @@ def stitchtopology(vs, fs, edgedist, epsilon=1e-2, return_cut_edges=False, retur
 
     return retbundle
 
+## Given collection of triangle soup with ground truth topology, compute least-squares translation per triangle to best align vertices
+### TODO: can we run once or do we need to iterate weights until 1/0?
+def leastSquaresTranslation(vertices, faces, trisoup, iterate=False):
+    """ vertices: V x 3 np array
+        faces: F x 3 np array
+        trisoup: F x 3 x 2 np array
+
+        returns: F x 2 numpy array with optimized translations per triangle"""
+    from meshing.mesh import Mesh
+
+    # Build A, B matrices using the edge connectivity
+    mesh = Mesh(vertices, faces)
+    fconn, vconn = mesh.topology.export_edge_face_connectivity(faces) # E x {f0, f1}, E x {v0,v1}
+    A = np.zeros((len(fconn) * 2, len(faces)))
+
+    # Duplicate every row of fconn (bc each edge involves two vertex pairs)
+    edge_finds = np.repeat(fconn, 2, axis=0)
+    A[:,edge_finds[:,0]] = 1 # distance vectors go f0 -> f1
+    A[:,edge_finds[:,1]] = -1
+
+    ef0 = trisoup[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
+    ef1 = trisoup[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
+
+    B = (ef1 - ef0).reshape(2 * len(fconn), 2)
+
+    # Debugging
+    print(ef1[0] - ef0[0])
+    print(B[:2])
+
+    opttrans = torch.linalg.lstsq(A, B)
+
+    return opttrans
+
 class FourierFeatureTransform(torch.nn.Module):
     """
     An implementation of Gaussian Fourier feature mapping.
