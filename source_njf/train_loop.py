@@ -902,7 +902,8 @@ class MyNet(pl.LightningModule):
                                                                 min_lr=1e-7, verbose=True)
 
         # Add translation as additional parameter
-        if self.args.no_poisson:
+        # NOTE: With gradient stitching, we use L0 weighted least squares instead
+        if self.args.no_poisson and not self.args.lossgradientstitching:
             self.trainer.fit_loop.setup_data()
             dataloader = self.trainer.train_dataloader
             for i, bundle in enumerate(dataloader):
