@@ -138,10 +138,8 @@ class MyNet(pl.LightningModule):
             # NOTE: In this case we can initialize random vector input of SAME channels and keep channels constant throughout
             channels = point_dim + code_dim
             self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, channels),
-                                                    nn.GroupNorm(num_groups=9, num_channels=channels),
                                                     nn.ReLU(),
                                                     nn.Linear(channels, channels),
-                                                    nn.GroupNorm(num_groups=9, num_channels=channels),
                                                     nn.ReLU(),
                                                     nn.Linear(channels, channels),
                                                     )
@@ -351,6 +349,9 @@ class MyNet(pl.LightningModule):
 
         self.val_step_iter += 1
 
+        if torch.rand(1).item() > self.args.valrenderatio:
+            return val_loss
+
         ### Visualizations
         lossdict = batch_parts['lossdict']
         # Construct mesh and ftoe matrix
@@ -413,16 +414,6 @@ class MyNet(pl.LightningModule):
                         [os.path.join(save_path, f"{key}_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
             self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
 
-            # Postprocess stitch
-            # if self.args.lossgradientstitching:
-            #     plot_uv(save_path, f"gradstitch epoch {self.current_epoch:05}", batch_parts["stitchV"],
-            #             batch_parts["stitchT"].squeeze(), losses={'distortionloss': batch_parts['stitchDistortion'],
-            #                                                       'stitchdistortionloss': batch_parts['stitchDistortion'],
-            #                                                       'edgegradloss': lossdict[0]['edgegradloss']})
-            #     images = [os.path.join(save_path, 'frames', f"gradstitch_epoch_{self.current_epoch:05}.png")] + \
-            #                 [os.path.join(save_path, 'frames', f"{key}_gradstitch_epoch_{self.current_epoch:05}.png") for key in ['distortionloss', 'stitchdistortionloss', 'edgegradloss']]
-            #     self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
-
             ### Losses on 3D surfaces
             for key, val in lossdict[0].items():
                 if "loss" in key: # Hacky way of avoiding aggregated values
@@ -454,25 +445,24 @@ class MyNet(pl.LightningModule):
                         fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
                         vmin=0, vmax=0.6)
 
-            # if self.args.lossgradientstitching:
-            #     # Convert edge cuts to vertex values (separate for each tri => in order of tris)
-            #     cutedges = batch_parts['cutEdges'] # Indices of cut edges
-            #     vs, fs, es = mesh.export_soup()
-            #     cutvs = np.unique(es[cutedges]) # Indices of cut vs
-            #     vcut_vals = []
-            #     for f in fs:
-            #         for v in f:
-            #             if v in cutvs:
-            #                 vcut_vals.append(1)
-            #             else:
-            #                 vcut_vals.append(0)
-            #     vcut_vals = np.array(vcut_vals)
+            if self.args.lossgradientstitching:
+                # Convert edge cuts to vertex values (separate for each tri => in order of tris)
+                cutedges = batch_parts['cutEdges'] # Indices of cut edges
+                vs, fs, es = mesh.export_soup()
+                cutvs = np.unique(es[cutedges]) # Indices of cut vs
+                vcut_vals = []
+                for f in fs:
+                    for v in f:
+                        if v in cutvs:
+                            vcut_vals.append(1)
+                        else:
+                            vcut_vals.append(0)
+                vcut_vals = np.array(vcut_vals)
 
-            #     export_views(mesh, save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
-            #                 plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
-            #                 vcolor_vals= vcut_vals, device="cpu", n_sample=25, width=200, height=200,
-            #                 vmin=0, vmax=1, outline_width=0)
-            # else:
+                export_views(mesh, save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
+                            plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
+                            vcolor_vals= vcut_vals, device="cpu", n_sample=25, width=200, height=200,
+                            vmin=0, vmax=1, outline_width=0)
 
         return val_loss
 
@@ -535,10 +525,10 @@ class MyNet(pl.LightningModule):
 
             # If gradient stitching, then we save a new tensor with the translated components
             # NOTE: stop gradient here so the translation loss doesn't affect the network
-            if self.args.lossgradientstitching:
-                trans_V = pred_V.detach() + self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
+            # if self.args.lossgradientstitching:
+            #     trans_V = pred_V.detach() + self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
             # Add back the optimized translational components
-            else:
+            if not self.args.lossgradientstitching:
                 pred_V += self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
 
             # Center (for visualization purposes)
@@ -570,7 +560,7 @@ class MyNet(pl.LightningModule):
 
         # NOTE: pred_V should be F x 3 x 2
         loss = self.lossfcn.computeloss(vertices, faces, pred_V, pred_J[:,:2,:sourcedim], initjacobs=initj,
-                                        seplossdelta=seplossdelta, transuv=trans_V if self.args.lossgradientstitching else None)
+                                        seplossdelta=seplossdelta, transuv=None)
         lossrecord = self.lossfcn.exportloss()
         self.lossfcn.clear() # This resets the loss record dictionary
 
@@ -613,41 +603,43 @@ class MyNet(pl.LightningModule):
 
             # NOTE: Post-process topology if running edge gradient optimization
             # Run poisson solve on updated topology
-            # if self.args.lossgradientstitching:
-            #     # TODO: WE'RE CUTTING THE BOUNDARY EDGES ON ACCIDENT
-            #     postv, postf, cutedges, cutlength = stitchtopology(ret['source_V'].detach().cpu().numpy(), ret['ogT'], lossrecord[0]['edgegradloss'],
-            #                                                        epsilon=self.args.stitcheps,
-            #                                                        return_cut_edges=True, return_cut_length = True)
-            #     meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(postv, postf, source.source_dir, source._SourceMesh__ttype, cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks, load_wks_centroids=source._SourceMesh__use_wks)
-            #     meshprocessor.prepare_temporary_differential_operators(source._SourceMesh__ttype)
-            #     poissonsolver = meshprocessor.diff_ops.poisson_solver
-            #     with torch.no_grad():
-            #         # Need full Jacobian for poisson solve
-            #         if len(pred_J.shape) == 3:
-            #             pred_J = pred_J.unsqueeze(0)
-            #         if len(initj.shape) == 3:
-            #             initj = initj.unsqueeze(0)
-            #         if initj is not None:
-            #             pred_J = torch.cat([torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:2], initj[:,:,:2,:])),
-            #                                 torch.zeros(pred_J.shape[0], pred_J.shape[1], 1, pred_J.shape[3], device=self.device)],
-            #                             dim=2) # B x F x 3 x 3
-            #         if self.args.align_2D:  # if the target is in 2D the last column of J is 0
-            #             pred_J[:, :,2,:] = 0 # NOTE: predJ shape is B x F x 3 x 3 (where first 3-size is interpreted as axes)
-            #         # TODO: ASK NOAM ABOUT WHETHER YOU CAN DO THIS WITH TRIANGLE SOUP
-            #         stitchv = poissonsolver.solve_poisson(pred_J)
-            #         stitchJ = poissonsolver.jacobians_from_vertices(stitchv)
+            if self.args.lossgradientstitching:
+                # Replace predV with L0 lstsq translations
+                from source_njf.utils import leastSquaresTranslation
 
-            #     ret['stitchV'] = stitchv.squeeze().detach().cpu().numpy()
-            #     ret['stitchT'] = postf
+                vs = source.get_vertices().detach().cpu().numpy()
+                fs = faces.detach().numpy()
 
-            #     ret['cutEdges'] = cutedges
-            #     ret['cutLength'] = cutlength
+                opttrans, cutedges, cutlength = leastSquaresTranslation(vs, fs, pred_V.detach().cpu().numpy(), return_cuts = True,
+                                                   iterate=True, debug=False, patience=5)
+                ret['pred_V'] = (pred_V.detach() + torch.from_numpy(opttrans).to(self.device)).reshape(-1, 2)
+                ret['cutEdges'] = cutedges
+                ret['cutLength'] = cutlength
 
-            #     # Compute distortion of stitched mesh
-            #     stitchdirichlet = symmetricdirichlet(torch.from_numpy(postv).to(self.device), torch.from_numpy(postf).to(self.device), stitchJ[0, :,:2,:])
-            #     ret['stitchDistortion'] = stitchdirichlet.detach().cpu().numpy()
-
-            ret['pred_V'] = pred_V.detach().reshape(-1, 2)
+                # TODO: WE'RE CUTTING THE BOUNDARY EDGES ON ACCIDENT
+                # postv, postf, cutedges, cutlength = stitchtopology(ret['source_V'].detach().cpu().numpy(), ret['ogT'], lossrecord[0]['edgegradloss'],
+                #                                                    epsilon=self.args.stitcheps,
+                #                                                    return_cut_edges=True, return_cut_length = True)
+                # meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(postv, postf, source.source_dir, source._SourceMesh__ttype, cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks, load_wks_centroids=source._SourceMesh__use_wks)
+                # meshprocessor.prepare_temporary_differential_operators(source._SourceMesh__ttype)
+                # poissonsolver = meshprocessor.diff_ops.poisson_solver
+                # with torch.no_grad():
+                #     # Need full Jacobian for poisson solve
+                #     if len(pred_J.shape) == 3:
+                #         pred_J = pred_J.unsqueeze(0)
+                #     if len(initj.shape) == 3:
+                #         initj = initj.unsqueeze(0)
+                #     if initj is not None:
+                #         pred_J = torch.cat([torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:2], initj[:,:,:2,:])),
+                #                             torch.zeros(pred_J.shape[0], pred_J.shape[1], 1, pred_J.shape[3], device=self.device)],
+                #                         dim=2) # B x F x 3 x 3
+                #     if self.args.align_2D:  # if the target is in 2D the last column of J is 0
+                #         pred_J[:, :,2,:] = 0 # NOTE: predJ shape is B x F x 3 x 3 (where first 3-size is interpreted as axes)
+                #     # TODO: ASK NOAM ABOUT WHETHER YOU CAN DO THIS WITH TRIANGLE SOUP
+                #     stitchv = poissonsolver.solve_poisson(pred_J)
+                #     stitchJ = poissonsolver.jacobians_from_vertices(stitchv)
+            else:
+                ret['pred_V'] = pred_V.detach().reshape(-1, 2)
             ret['T'] = np.arange(len(faces)*3).reshape(len(faces), 3)
 
             with torch.no_grad():
@@ -964,7 +956,7 @@ def main(gen, args):
     pl.seed_everything(48, workers=True)
 
     # Save directory
-    save_path = os.path.join("outputs", args.expname)
+    save_path = os.path.join(args.outputdir, args.expname)
     if args.overwrite and os.path.exists(save_path):
         from utils import clear_directory
         clear_directory(save_path)
@@ -1022,17 +1014,17 @@ def main(gen, args):
     id = None
     if args.continuetrain:
         import re
-        if os.path.exists(os.path.join('outputs', args.expname, 'wandb', 'latest-run')):
-            for idfile in os.listdir(os.path.join('outputs', args.expname, 'wandb', 'latest-run')):
+        if os.path.exists(os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')):
+            for idfile in os.listdir(os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')):
                 if idfile.endswith(".wandb"):
                     result = re.search(r'run-([a-zA-Z0-9]+)', idfile)
                     if result is not None:
                         id = result.group(1)
                         break
         else:
-            print(f"Warning: No wandb record found in {os.path.join('outputs', args.expname, 'wandb', 'latest-run')}!. Starting log from scratch...")
+            print(f"Warning: No wandb record found in {os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')}!. Starting log from scratch...")
 
-    logger = WandbLogger(project='njfwand', name=args.expname, save_dir=os.path.join("outputs", args.expname), log_model='all' if not args.debug else False,
+    logger = WandbLogger(project='njfwand', name=args.expname, save_dir=os.path.join(args.outputdir, args.expname), log_model='all' if not args.debug else False,
                          offline=args.debug, resume='must' if args.continuetrain and id is not None else 'allow', id = id)
 
     # if args.gpu_strategy:

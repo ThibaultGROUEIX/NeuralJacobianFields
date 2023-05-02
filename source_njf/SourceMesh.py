@@ -20,7 +20,8 @@ class SourceMesh:
 
     def __init__(self, source_ind, source_dir, extra_source_fields,
                  random_scale, ttype, use_wks=False, random_centering=False,
-                cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False):
+                cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False,
+                initjinput=False):
         self.__use_wks = use_wks
         self.source_ind = source_ind
         # NOTE: This is the CACHE DIRECTORY
@@ -38,6 +39,7 @@ class SourceMesh:
         self.mesh_processor = None
         self.cpuonly = cpuonly
         self.init = init
+        self.initjinput = initjinput
         self.flatten = flatten
 
         self.fft = None
@@ -167,7 +169,7 @@ class SourceMesh:
                 torch.save(self.tuttefuv, os.path.join(self.source_dir, "tuttefuv.pt"))
                 torch.save(self.tutteuv, os.path.join(self.source_dir, "tutteuv.pt"))
                 torch.save(self.tuttej, os.path.join(self.source_dir, "tuttej.pt"))
-                torch.load(self.tuttetranslate, os.path.join(self.source_dir, "tuttetranslate.pt"))
+                torch.save(self.tuttetranslate, os.path.join(self.source_dir, "tuttetranslate.pt"))
 
             ## Store in loaded data so it gets mapped to device
             # Remove extraneous dimension
@@ -175,6 +177,9 @@ class SourceMesh:
             self.__loaded_data['tutteuv'] = self.tutteuv
             self.__loaded_data['tuttej'] = self.tuttej
             self.__loaded_data['tuttetranslate'] = self.tuttetranslate
+
+            if self.initjinput:
+                self.centroids_and_normals = torch.cat([self.centroids_and_normals, self.tuttej.reshape(len(self.centroids_and_normals), -1)], dim=1)
 
             # self.__loaded_data['localj'] = self.localj
 
@@ -246,6 +251,9 @@ class SourceMesh:
             self.__loaded_data['isofuv'] = self.isofuv
             self.__loaded_data['isoj'] = self.isoj
             self.__loaded_data['isotranslate'] = self.isotranslate
+
+            if self.initjinput:
+                self.centroids_and_normals = torch.cat([self.centroids_and_normals, self.isoj.reshape(len(self.centroids_and_normals), -1)], dim=1)
 
             # self.__loaded_data['localj'] = self.localj
 

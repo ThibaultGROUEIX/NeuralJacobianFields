@@ -75,8 +75,9 @@ def tutte_embedding(vertices, faces, fixclosed=False):
         EdgeCut(mesh, 0).apply()
         EdgeCut(mesh, he2).apply()
         bnd = igl.boundary_loop(faces)
-    elif bnd is None:
-        raise ValueError(f"tutte_embedding: mesh has no boundary and fixclosed is not set!")
+
+    if bnd is None:
+        raise ValueError(f"tutte_embedding: mesh has no boundary! set fixclosed = True to try to cut to disk topology.")
 
     ## Map the boundary to a circle, preserving edge proportions
     bnd_uv = igl.map_vertices_to_circle(vertices, bnd)
@@ -321,7 +322,8 @@ def stitchtopology(vs, fs, edgedist, epsilon=1e-2, return_cut_edges=False, retur
     return retbundle
 
 ## Given collection of triangle soup with ground truth topology, compute least-squares translation per triangle to best align vertices
-def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False, patience=5):
+def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False, patience=5,
+                            return_cuts = False, cut_epsilon=1e-2, iter_limit=50):
     """ vertices: V x 3 np array
         faces: F x 3 np array
         trisoup: F x 3 x 2 np array
@@ -365,7 +367,24 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
             if stationary_count >= patience:
                 print(f"L0 convergence after {tot_count} steps!")
                 break
-            opttrans, residuals, rank, s = np.linalg.lstsq(weights * A, weights * B, rcond=None)
+
+            if tot_count >= iter_limit:
+                print(f"Did not converge before iteration limit {iter_limit}!")
+                break
+
+            if not np.all(np.isfinite(weights)):
+                # Replace nan with 0 and infty with 1
+                print(f"Non-finite values discovered. Found {np.sum(np.isnan(weights))} nan. Found {np.sum(np.isinf(weights))} infty.")
+                weights[np.isinf(weights)] = 1
+                weights[np.isnan(weights)] = 0
+
+            try:
+                opttrans, residuals, rank, s = np.linalg.lstsq(weights * A, weights * B, rcond=None)
+            except Exception as e:
+                import pdb
+                pdb.set_trace()
+                print(e)
+                raise Exception() from e
             finaltrans += opttrans.reshape(-1, 1, 2)
             newsoup = trisoup + finaltrans
 
@@ -398,7 +417,7 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
                     stationary_count = 0
             prev_weights = weights
             tot_count += 1
-            print(f"L0 least squares translation: done with step {tot_count}. Stationary count: {stationary_count}.")
+            # print(f"L0 least squares translation: done with step {tot_count}. Stationary count: {stationary_count}.")
     else:
         opttrans, residuals, rank, s = np.linalg.lstsq(A, B, rcond=None)
         finaltrans = opttrans.reshape(-1, 1, 2)
@@ -406,6 +425,24 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
     if debug:
         ps_soup = ps.register_surface_mesh("final soup", newsoup.reshape(-1, 2), np.arange(len(faces) * 3).reshape(-1, 3), edge_width=1, enabled=True)
         ps.show()
+
+    if return_cuts:
+        cutlen = 0
+        cutedges = []
+        finalsoup = trisoup + finaltrans
+        ef0 = finalsoup[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
+        ef1 = finalsoup[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
+        edge_delta = np.sum(np.linalg.norm(ef1 - ef0, axis=-1), axis=1) # E x 1
+        bdrycount = 0
+        for eidx, edge in mesh.topology.edges.items():
+            if edge.onBoundary():
+                bdrycount += 1
+                continue
+            if edge_delta[eidx - bdrycount] > cut_epsilon:
+                cutlen += mesh.length(edge)
+                cutedges.append(eidx)
+
+        return finaltrans, cutedges, cutlen
 
     return finaltrans
 
@@ -595,20 +632,6 @@ def cut_to_disk_single(mesh, singular_vs, verbose=False):
         if mesh.topology.hasNonManifoldEdges():
             print(f"Mesh became non-manifold from cuts!")
             break
-
-def tutte_embedding(vertices, faces):
-    import igl
-    bnd = igl.boundary_loop(faces)
-
-    ## Map the boundary to a circle, preserving edge proportions
-    bnd_uv = igl.map_vertices_to_circle(vertices, bnd)
-
-    ## Harmonic parametrization for the internal vertices
-    assert not np.isnan(bnd).any()
-    assert not np.isnan(bnd_uv).any()
-    uv_init = igl.harmonic_weights(vertices, faces, bnd, np.array(bnd_uv, dtype=vertices.dtype), 1)
-
-    return uv_init
 
 def SLIM(mesh, v_with_holes = None, f_with_holes = None):
     # SLIM parameterization

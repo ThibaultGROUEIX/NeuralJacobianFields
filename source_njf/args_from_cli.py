@@ -28,6 +28,10 @@ def get_arg_parser():
 	parser.add_argument("--version",
 						help='version no',
 						type = int, default=0)
+	parser.add_argument("--outputdir",
+						help='output directory',
+						type = str, default='outputs')
+
 	### ARCH
 	parser.add_argument("--fft",
 							help='fourier features',
@@ -42,12 +46,15 @@ def get_arg_parser():
 						action="store_true")
 	parser.add_argument("--train_percentage",help = "the train/test split in percentage, default is 90",default=90,type=int)
 	parser.add_argument("--val_interval",help = "validation interval",default=None,type=int)
+	parser.add_argument("--valrenderratio",help = "ratio of samples to do validation renders for",default=1,type=float)
 	parser.add_argument("--epochs",help = "number of training epochs",default=2000,type=int)
 	parser.add_argument("--optimizer",choices={"adam", "sgd"}, help='type of optimizer', type = str,default="adam")
 	parser.add_argument("--identity", help='initialize network from identity', action="store_true")
 	parser.add_argument("--globaltrans", help='also predict global translation per shape code', action="store_true")
 	parser.add_argument("--init", choices={"tutte", "isometric"}, help="initialize 2D embedding", default=None, type=str)
 	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization")
+	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
+							action="store_true")
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
 						action="store_true")
 	parser.add_argument("--no_poisson", help="no poisson solve", action="store_true")

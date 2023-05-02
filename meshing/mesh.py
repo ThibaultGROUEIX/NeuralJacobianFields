@@ -41,7 +41,7 @@ class Mesh:
             old_inds = np.sort(np.unique(face_conn))
         else:
             old_inds = np.array(sorted(self.topology.vertices.keys()))
-        new_inds = np.arange(len(old_inds), dtype=np.int)
+        new_inds = np.arange(len(old_inds), dtype=int)
         vertices = self.vertices[old_inds]
         A = np.zeros(init_n, dtype=np.int64)
         A[old_inds] = new_inds

@@ -182,7 +182,8 @@ class DeformationDataset(Dataset):
         else:
             source = SourceMesh(source_index, join(self.directory, 'cache', f"{source_index}_{ind}"), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
                                 random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
-                                fft=self.args.fft, fft_dim=self.args.fft_dim, flatten=self.args.layer_normalization == "FLATTEN")
+                                initjinput = self.args.initjinput, fft=self.args.fft, fft_dim=self.args.fft_dim,
+                                flatten=self.args.layer_normalization == "FLATTEN")
             source.load()
             self.source = source
 
