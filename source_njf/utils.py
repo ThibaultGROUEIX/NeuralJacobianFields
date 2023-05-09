@@ -446,6 +446,30 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
 
     return finaltrans
 
+def polyscope_edge_perm(mesh):
+    # Need to map edge ordering based on polyscope's scheme
+    vs, fs, _ = mesh.export_soup()
+    polyscope_edges = []
+    for f in fs:
+        for i in range(len(f)):
+            e_candidate = {f[i], f[(i+1)%3]}
+            if e_candidate not in polyscope_edges:
+                polyscope_edges.append(e_candidate)
+    mesh_edges = [set([v.index for v in e.two_vertices()]) for eidx, e in sorted(mesh.topology.edges.items())]
+    # Build permutation
+    edge_p = []
+    for edge in polyscope_edges:
+        found = 0
+        for i in range(len(mesh_edges)):
+            meshe = mesh_edges[i]
+            if edge == meshe:
+                edge_p.append(i)
+                found = 1
+                break
+        if found == 0:
+            raise ValueError(f"No match found for polyscope edge {edge}")
+    return np.array(edge_p)
+
 # ====================== UV Stuff ========================
 def make_cut(mesh, cutlist, b0=None, b1=None):
     from meshing.edit import EdgeCut
