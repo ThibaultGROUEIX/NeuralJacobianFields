@@ -52,14 +52,14 @@ class DeformationDataset(Dataset):
                 source_target[s] = []
             source_target[s].append(t)
         # print(f"ellapsed {time.time() -st}")
-        if len(source_target) == 1 and not (args.init == "isometric" and args.ninit > 1):
+        if len(source_target) == 1 and not (args.init == "isometric" and args.ninit != 0):
             # This flag will avoid reloading the source at each iteration, since the source is always the same.
             self.unique_source = True
         self.source_and_target = []
         # TODO: duplicate source for however many initializations we need
         for s,ts in source_target.items():
             chunks = np.split(ts, np.arange(args.targets_per_batch,len(ts),args.targets_per_batch))
-            if args.init == "isometric":
+            if args.init == "isometric" and args.ninit > 0:
                 for _ in range(args.ninit):
                     for chunk in chunks:
                         self.source_and_target.append((s,chunk))
@@ -183,13 +183,13 @@ class DeformationDataset(Dataset):
             source = SourceMesh(source_index, join(self.directory, 'cache', f"{source_index}_{ind}"), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
                                 random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
                                 initjinput = self.args.initjinput, fft=self.args.fft, fft_dim=self.args.fft_dim,
-                                flatten=self.args.layer_normalization == "FLATTEN")
-            source.load()
+                                flatten=self.args.layer_normalization == "FLATTEN", debug=self.args.debug)
+            source.load(new_init=self.args.ninit == -1)
             self.source = source
 
         # ==================================================================
         # LOAD TARGET
-        target = BatchOfTargets(target_index, [join(self.directory, 'cache', target_index[i]) for i in range(len(target_index))], self.target_keys, scales[False], self.ttype)
+        target = BatchOfTargets(target_index, [join(self.directory, 'cache', f"{target_index[i]}_{ind}") for i in range(len(target_index))], self.target_keys, scales[False], self.ttype)
         target.load()
         return source, target
 

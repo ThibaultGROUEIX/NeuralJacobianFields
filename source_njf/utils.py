@@ -90,15 +90,44 @@ def tutte_embedding(vertices, faces, fixclosed=False):
     return uv_init
 
 # Convert each triangle into local coordinates: A -> (0,0), B -> (x2, 0), C -> (x3, y3)
-def get_local_tris(vertices, faces, device=torch.device("cpu")):
+def get_local_tris(vertices, faces, basis=None, device=torch.device("cpu")):
+    """basis: F x 1 array of integers from 1-6 indicating the basis type to initialize with
+        (1) ab
+        (2) ba
+        (3) ac
+        (4) ca
+        (5) bc
+        (6) cb """
     fverts = vertices[faces].to(device)
-    e1 = fverts[:, 1, :] - fverts[:, 0, :]
-    e2 = fverts[:, 2, :] - fverts[:, 0, :]
+    if basis is None:
+        e1 = fverts[:, 1, :] - fverts[:, 0, :]
+        e2 = fverts[:, 2, :] - fverts[:, 0, :]
+    else:
+        ogdict = {0: 0, 1: 1, 2: 0, 3: 2, 4: 1, 5: 2}
+        xdict = {0: 1, 1: 0, 2: 2, 3: 0, 4: 2, 5: 1}
+        basisog = np.array([ogdict[b] for b in basis])
+        basisx = np.array([xdict[b] for b in basis])
+        used_i = np.stack([basisog, basisx], axis=1)
+        basise = np.array([int(list(set(range(3)).difference(set(used)))[0]) for used in used_i]) # Set differences
+        e1 = fverts[torch.arange(len(basisx)), basisx, :] - fverts[torch.arange(len(basisx)), basisog, :]
+        e2 = fverts[torch.arange(len(basisx)), basise, :] - fverts[torch.arange(len(basisx)), basisog, :]
+
+    # Vector parameters
     s = torch.linalg.norm(e1, dim=1)
     t = torch.linalg.norm(e2, dim=1)
     angle = torch.acos(torch.sum(e1 / s[:, None] * e2 / t[:, None], dim=1))
-    x = torch.column_stack([torch.zeros(len(angle)).to(device), s, t * torch.cos(angle)])
-    y = torch.column_stack([torch.zeros(len(angle)).to(device), torch.zeros(len(angle)).to(device), t * torch.sin(angle)])
+
+    # Position parameters
+    x = torch.zeros(len(angle), 3).double()
+    x[torch.arange(len(angle)), basisog] = s
+    x[torch.arange(len(angle)),basise] = t * torch.cos(angle)
+
+    y = torch.zeros(len(angle), 3).double()
+    y[torch.arange(len(angle)), basise] = t * torch.sin(angle)
+
+    # x = torch.column_stack([torch.zeros(len(angle)).to(device), s, t * torch.cos(angle)])
+    # y = torch.column_stack([torch.zeros(len(angle)).to(device), torch.zeros(len(angle)).to(device), t * torch.sin(angle)])
+
     local_tris = torch.stack((x, y), dim=-1).reshape(len(angle), 3, 2)
     return local_tris
 
@@ -323,16 +352,19 @@ def stitchtopology(vs, fs, edgedist, epsilon=1e-2, return_cut_edges=False, retur
 
 ## Given collection of triangle soup with ground truth topology, compute least-squares translation per triangle to best align vertices
 def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False, patience=5,
-                            return_cuts = False, cut_epsilon=1e-2, iter_limit=50):
+                            return_cuts = False, cut_epsilon=1e-1, iter_limit=50, weightfaces=False):
     """ vertices: V x 3 np array
         faces: F x 3 np array
         trisoup: F x 3 x 2 np array
 
         returns: F x 2 numpy array with optimized translations per triangle"""
     from meshing.mesh import Mesh
+    from meshing.analysis import computeFacetoEdges
 
     # Build A, B matrices using the edge connectivity
     mesh = Mesh(vertices, faces)
+    computeFacetoEdges(mesh)
+
     fconn, vconn = mesh.topology.export_edge_face_connectivity(faces)
     fconn = np.array(fconn, dtype=int) # E x {f0, f1}
     vconn = np.array(vconn, dtype=int) # E x [[v0_1,v1_1], [v0_2, v1_2]]
@@ -381,10 +413,13 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
             try:
                 opttrans, residuals, rank, s = np.linalg.lstsq(weights * A, weights * B, rcond=None)
             except Exception as e:
-                import pdb
-                pdb.set_trace()
                 print(e)
-                raise Exception() from e
+                print(f"Error encountered in least squares, exiting...")
+                break
+                # import pdb
+                # pdb.set_trace()
+                # print(e)
+                # raise Exception() from e
             finaltrans += opttrans.reshape(-1, 1, 2)
             newsoup = trisoup + finaltrans
 
@@ -400,8 +435,12 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
             B = (ef1 - ef0).reshape(2 * len(fconn), 2) # E * 2 x 2
 
             # Weights are 1/(correspondence distances)
-            # TODO: maybe we should sum over faces instead
             weights = 1/(np.linalg.norm(B, axis=1, keepdims=1) + 1e-10)
+
+            if weightfaces:
+                faceweights = np.linalg.norm(ef1[mesh.ftoe] - ef0[mesh.ftoe], axis=-1) # F x 3 x 2
+                weights = np.mean(faceweights, axis=[1,2])
+
             weights /= np.max(weights) # Normalize
 
             if debug:

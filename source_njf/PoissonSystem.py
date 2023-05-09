@@ -364,7 +364,7 @@ class PoissonSolver:
                 sol = torch.cat([sol[:, :pidx], torch.zeros(sol.shape[0], 1, sol.shape[2]).type_as(sol), sol[:,pidx:]], dim=1)
 
             assert sol.shape[1] == len(self.components), f"Final UVs after undoing pinning {sol.shape[1]} should be same as components array {len(self.components)}"
-            pin_trans = torch.zeros(sol.shape) # Should be same length
+            pin_trans = torch.zeros(sol.shape, device=sol.device) # Should be same length
             # Assign same component groups the same translation
             for cpi in np.unique(self.components):
                 cp_idx = np.where(self.components == cpi)[0]

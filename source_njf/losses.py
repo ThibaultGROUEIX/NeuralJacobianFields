@@ -82,7 +82,7 @@ class UVLoss:
         if self.args.lossdistortion == "arap":
             local_tris = get_local_tris(vertices, faces, device=self.device)
             fareas = meshArea2D(vertices, faces, return_fareas=True)
-            distortionenergy = arap(local_tris, faces, uv,
+            distortionenergy = fareas * arap(local_tris, faces, uv,
                                 device=self.device, renormalize=False,
                                 return_face_energy=True, timeit=False)
             self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
@@ -92,6 +92,13 @@ class UVLoss:
 
         if self.args.lossdistortion == "dirichlet":
             distortionenergy = symmetricdirichlet(vertices, faces, jacobians, init_jacob=initjacobs)
+            self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
+
+            if not self.args.losscount:
+                loss += torch.mean(distortionenergy)
+
+        if self.args.lossdistortion == "edge":
+            distortionenergy = edgedistortion(vertices, faces, uv)
             self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
 
             if not self.args.losscount:
@@ -134,6 +141,36 @@ class UVLoss:
         return self.currentloss
 
 # ==================== Energies ===============================
+# Edge distortion: MSE between UV edge norm and original edge norm
+def edgedistortion(vs, fs, uv):
+    """vs: V x 3
+       fs: F x 3
+       uv: F x 3 x 2 """
+    from meshing import Mesh
+    from meshing.analysis import computeFacetoEdges
+
+    # NOTE: Mesh data structure doesn't respect original face ordering
+    # so we have to use custom edge-face connectivity export function
+    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
+    computeFacetoEdges(mesh)
+
+    # Edge lengths per triangle
+    f_elens = []
+    uv_elens = []
+    fverts = vs[fs] # F x 3 x 3
+    for fi in range(len(fverts)):
+        f_elens.append([torch.linalg.norm(fverts[fi, 1] - fverts[fi, 0]), torch.linalg.norm(fverts[fi, 2] - fverts[fi, 1]), torch.linalg.norm(fverts[fi, 2] - fverts[fi, 0])])
+        uv_elens.append([torch.linalg.norm(uv[fi, 1] - uv[fi, 0]), torch.linalg.norm(uv[fi, 2] - uv[fi, 1]), torch.linalg.norm(uv[fi, 2] - uv[fi, 0])])
+
+    f_elens = torch.tensor(f_elens, device=uv.device)
+    uv_elens = torch.tensor(uv_elens, device=uv.device)
+    energy = torch.nn.functional.mse_loss(uv_elens, f_elens, reduction='none')
+
+    # Sum over triangles
+    energy = torch.sum(energy, dim=1)
+
+    return energy
+
 # Autocuts energy involves weighted sum of two measures
 #   - Triangle distortion: symmetric dirichlet (sum of Fnorm of jacobian and inverse jacobian)
 #   - Edge separation: f(L1 norm between UVs of corresponding vertices) w/ f = x^2/(x^2 + delta) (delta smoothing parameter -> converge to 0 over time)

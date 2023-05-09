@@ -52,7 +52,7 @@ def get_arg_parser():
 	parser.add_argument("--identity", help='initialize network from identity', action="store_true")
 	parser.add_argument("--globaltrans", help='also predict global translation per shape code', action="store_true")
 	parser.add_argument("--init", choices={"tutte", "isometric"}, help="initialize 2D embedding", default=None, type=str)
-	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization")
+	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization. -1 indicates new initialization for EACH load")
 	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
 							action="store_true")
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
@@ -88,12 +88,13 @@ def get_arg_parser():
 	parser.add_argument("--normalize_jac_loss", help="normalize jacobians 1/norm(GT) when comparing them, default is false",action="store_true")
 	parser.add_argument("--precision",help ="the precision we work in, should be 16,32,or 64 (default)",default=64,type=int)
 	parser.add_argument("--vertex_loss_weight", help="the weight to place on the vertex loss (jacobian loss is unweighted) default = 1.0", default=1.0, type=float)
-
+	###### POSTPROCESS ######
+	parser.add_argument("--opttrans", help = "predict l0 translation and visualize", action="store_true")
 	###### LOSSES ######
-	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet'})
+	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet', 'edge'})
 	parser.add_argument("--losscount", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--lossgradientstitching", choices={'l2', 'split'}, help = "use gradient stitching loss", default=None)
-	parser.add_argument("--stitcheps", help="epsilon for edge stitching post-process", default=1e-2, type=float)
+	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
 
 	parser.add_argument("--gradlossweight", help="weight for the uv grad loss", default=1, type=float)
 	parser.add_argument("--lossedgeseparation", help = "use edge separation loss", action="store_true")

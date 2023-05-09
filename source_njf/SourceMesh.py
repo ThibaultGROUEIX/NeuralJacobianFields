@@ -21,7 +21,7 @@ class SourceMesh:
     def __init__(self, source_ind, source_dir, extra_source_fields,
                  random_scale, ttype, use_wks=False, random_centering=False,
                 cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False,
-                initjinput=False):
+                initjinput=False, debug=False):
         self.__use_wks = use_wks
         self.source_ind = source_ind
         # NOTE: This is the CACHE DIRECTORY
@@ -41,6 +41,7 @@ class SourceMesh:
         self.init = init
         self.initjinput = initjinput
         self.flatten = flatten
+        self.debug = debug
 
         self.fft = None
         if fft:
@@ -85,7 +86,7 @@ class SourceMesh:
         return self
 
     ### PRECOMPUTATION HAPPENS HERE ###
-    def __init_from_mesh_data(self):
+    def __init_from_mesh_data(self, new_init=False):
         assert self.mesh_processor is not None
         self.mesh_processor.prepare_differential_operators_for_use(self.__ttype) #call 1
         self.source_vertices = torch.from_numpy(self.mesh_processor.get_vertices()).type(
@@ -195,7 +196,8 @@ class SourceMesh:
         elif self.init == "isometric":
             if os.path.exists(os.path.join(self.source_dir, "isofuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "isoj.pt")) and \
-                os.path.exists(os.path.join(self.source_dir, "isotranslate.pt")):
+                os.path.exists(os.path.join(self.source_dir, "isotranslate.pt")) and \
+                not new_init:
 
                 self.isofuv = torch.load(os.path.join(self.source_dir, "isofuv.pt"))
                 self.isoj = torch.load(os.path.join(self.source_dir, "isoj.pt"))
@@ -208,11 +210,36 @@ class SourceMesh:
                 faces = self.get_source_triangles()
                 fverts = vertices[faces]
 
-                local_tris = get_local_tris(vertices, faces) # F x 3 x 2
+                # Random choice of local basis
+                # TODO: precompute the 6 possible local tris for each triangle
+                if new_init:
+                    basistype = np.random.choice(6, size=len(faces))
+                    local_tris = get_local_tris(vertices, faces, basis=basistype) # F x 3 x 2
+                else:
+                    local_tris = get_local_tris(vertices, faces) # F x 3 x 2
+
+                # TODO: TRY PROJECTING TO PRINCIPAL CURVATURE BASIS INSTEAD
+                # TODO: random init -> 6 dfft local bases for each triangle, just sample from them (ab => [1,0], ba => [-1,0], ...)
+
+                # Randomly sample rotations
+                # thetas = np.random.uniform(low=0, high=2 * np.pi, size=len(local_tris))
+                # rotations = np.array([[[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]] for theta in thetas])
+                # local_tris = (np.matmul(rotations, local_tris.transpose(2,1))).transpose(2,1) # F x 3 x 2
 
                 # Randomly sample displacements
                 # NOTE: might need to alter the scales here
                 self.isofuv = local_tris + np.random.uniform(size=(local_tris.shape[0], 1, local_tris.shape[2])) # F x 3 x 2
+
+                # Unit testing: face areas should be same as in 3D
+                from meshing.mesh import Mesh
+                from meshing.analysis import computeFaceAreas
+
+                mesh = Mesh(vertices.detach().cpu().numpy(), faces)
+                computeFaceAreas(mesh)
+                fareas3d = mesh.fareas
+                fareas2d = 0.5 * np.abs(torch.linalg.det(torch.cat([torch.ones((len(self.isofuv), 1, 3)).float(), self.isofuv.transpose(2,1)], dim=1)).numpy())
+
+                np.testing.assert_allclose(fareas3d, fareas2d, err_msg="Isometric embedding: all triangle areas should be same!")
 
                 #### Get jacobians using gradient operator per triangle
                 from igl import grad
@@ -283,7 +310,7 @@ class SourceMesh:
             self.__loaded_data[key] = data
         # print("Ellapsed load source mesh ", time.time() - start)
 
-    def load(self, source_v=None, source_f=None):
+    def load(self, source_v=None, source_f=None, new_init=False):
         if source_v is not None and source_f is not None:
             self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_array(source_v,source_f, self.source_dir, self.__ttype, cpuonly=self.cpuonly, load_wks_samples=self.__use_wks, load_wks_centroids=self.__use_wks)
         else:
@@ -291,7 +318,7 @@ class SourceMesh:
                 self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_directory(self.source_dir, self.__ttype, cpuonly=self.cpuonly, load_wks_samples=self.__use_wks, load_wks_centroids=self.__use_wks)
             else:
                 self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_file(self.source_dir, self.__ttype, cpuonly=self.cpuonly, load_wks_samples=self.__use_wks, load_wks_centroids=self.__use_wks)
-        self.__init_from_mesh_data()
+        self.__init_from_mesh_data(new_init)
 
     def get_point_dim(self):
         if self.flatten:

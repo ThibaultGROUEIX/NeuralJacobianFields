@@ -7,6 +7,7 @@ def computeEdgeNeighborMatrix(mesh):
                    for key, edge in sorted(mesh.topology.edges.items())]
     mesh.edgemat = np.array(edge_matrix, dtype=int)
 
+# NOTE: Ignores boundary!!
 def computeFacetoEdges(mesh):
     ftoe = [[edge.index for edge in face.adjacentEdges() if not edge.onBoundary()]
                     for key, face in sorted(mesh.topology.faces.items())]
@@ -184,3 +185,9 @@ def computeEdgeRatios(mesh):
     ratios = np.column_stack((ratio1, ratio2))
     ratios = np.sort(ratios, axis=1)
     mesh.edgeratios = ratios
+
+def computeEdgeLengths(mesh):
+    lengths = []
+    for key, e in sorted(mesh.topology.edges.items()):
+        lengths.append(mesh.length(e))
+    mesh.edgelengths = np.array(lengths)

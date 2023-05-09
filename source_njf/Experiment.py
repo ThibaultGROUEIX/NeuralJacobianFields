@@ -131,11 +131,11 @@ class Experiment(ABC):
         self.name = self.args.expname
         print(f"starting training with args: {args}")
 
-        if not args.continuetrain:
+        if not args.continuetrain and not args.test:
             gen = self.get_encoder(args)
         else: # Load latest checkpoint model based on checkpoints folder in output path
             import re
-            checkpointdir = os.path.join("outputs", self.args.expname, "ckpt")
+            checkpointdir = os.path.join(self.args.outputdir, self.args.expname, "ckpt")
             if os.path.exists(checkpointdir):
                 maxepoch = 0
                 maxstep = 0
@@ -165,7 +165,7 @@ class Experiment(ABC):
                 gen = self.get_encoder(args)
 
         if args.test:
-            name = os.path.join(name,'test')
+            name = os.path.join(self.name,'test')
 
         main(gen, args)
 

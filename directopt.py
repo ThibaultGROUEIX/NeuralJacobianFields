@@ -34,11 +34,17 @@ parser.add_argument("--grad", choices={'l2', 'split'},
                     help='whether to use gradient stitching energy instead of standard edge separation (will still optimize translation with edge separation)',
                     default=None)
 parser.add_argument("--gradrelax", action="store_true")
+parser.add_argument("--grad", choices={'l2', 'split'},
+                    help='whether to use gradient stitching energy instead of standard edge separation (will still optimize translation with edge separation)',
+                    default=None)
 parser.add_argument("--overwrite", action="store_true")
 parser.add_argument("--continuetrain", action="store_true")
 parser.add_argument("--anneal", action="store_true")
 parser.add_argument("--debug", action="store_true")
 args = parser.parse_args()
+
+# TODO: no translation in gradient case! just use the L0 least squares.
+# TODO: new loss -- edge lengths instead of symmetric dirichlet
 
 EXPORT_FOLDER = args.savedir
 Path(EXPORT_FOLDER).mkdir(exist_ok=True, parents=True)

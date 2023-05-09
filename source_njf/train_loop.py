@@ -28,8 +28,8 @@ from signal import SIGUSR1
 from meshing.mesh import Mesh
 from meshing.analysis import computeFacetoEdges
 
-USE_CUPY = False
-has_gpu = "cpu"
+USE_CUPY = True
+has_gpu = "auto"
 if USE_CUPY and torch.cuda.is_available():
     import cupy
     has_gpu="gpu"
@@ -263,6 +263,10 @@ class MyNet(pl.LightningModule):
         # start = time.time()
         # torch.cuda.synchronize()
 
+        # if self.args.debug:
+        #     import pdb
+        #     pdb.set_trace()
+
         batch_parts = self.my_step(source_batches, batch_id)
 
         # torch.cuda.synchronize()
@@ -273,12 +277,16 @@ class MyNet(pl.LightningModule):
         loss = batch_parts["loss"]
         lossrecord = batch_parts["lossdict"]
 
-        self.log("train_loss", loss, logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+        # if self.args.debug:
+        #     import pdb
+        #     pdb.set_trace()
+
+        self.log("train_loss", loss, logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=False)
 
         # Log losses
         for key, val in lossrecord[0].items():
             if "loss" in key:
-                self.log(key, np.sum(val), logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+                self.log(key, np.sum(val), logger=True, prog_bar=False, batch_size=1, on_epoch=True, on_step=False)
 
         if self.args.debug:
             # Check memory consumption
@@ -295,6 +303,10 @@ class MyNet(pl.LightningModule):
             print(f'RAM memory % used: {psutil.virtual_memory()[2]}')
 
         return loss
+
+    def on_train_epoch_end(self):
+        self.log("epoch", self.current_epoch)
+        self.log("lr", self.trainer.optimizers[0].param_groups[0]['lr'], prog_bar=False, logger=True, batch_size=1)
 
     def test_step(self, batch, batch_idx):
         return self.my_step(batch, batch_idx)
@@ -344,12 +356,11 @@ class MyNet(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         batch_parts = self.my_step(batch, batch_idx, validation=True)
         val_loss = batch_parts['loss'].item()
-        self.log('val_loss', val_loss, logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
-        self.log("lr", self.trainer.optimizers[0].param_groups[0]['lr'], prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+        self.log('val_loss', val_loss, logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=False)
 
         self.val_step_iter += 1
 
-        if torch.rand(1).item() > self.args.valrenderatio:
+        if torch.rand(1).item() > self.args.valrenderratio:
             return val_loss
 
         ### Visualizations
@@ -380,7 +391,7 @@ class MyNet(pl.LightningModule):
         # Log losses
         for key, val in lossdict[0].items():
             if "loss" in key:
-                self.log(f"val_{key}", np.sum(val), logger=True, prog_bar=True, batch_size=1, on_epoch=True, on_step=True)
+                self.log(f"val_{key}", np.sum(val), logger=True, prog_bar=False, batch_size=1, on_epoch=True, on_step=False)
 
         # Log path
         source, target = batch
@@ -403,10 +414,10 @@ class MyNet(pl.LightningModule):
         if self.args.xp_type == "uv":
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
-                    plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().numpy(),
+                    plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(),
                             batch_parts["T"][idx].squeeze(), losses=lossdict[idx], ftoe=ftoe)
             else:
-                plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().numpy(),
+                plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
                         batch_parts["T"].squeeze(), losses=lossdict[0], ftoe=ftoe)
 
             # Log the plotted imgs
@@ -432,7 +443,7 @@ class MyNet(pl.LightningModule):
             ## Poisson values
             # Check poisson UVs (true UV)
             if "poissonUV" in batch_parts.keys():
-                plot_uv(save_path, f"poisson epoch {self.current_epoch:05}", batch_parts["poissonUV"].squeeze().detach().numpy(),
+                plot_uv(save_path, f"poisson epoch {self.current_epoch:05}", batch_parts["poissonUV"].squeeze().detach().cpu().numpy(),
                         batch_parts["ogT"].squeeze(), losses={'distortionloss': batch_parts['poissonDistortion']})
 
                 images = [os.path.join(save_path, f"poisson_epoch_{self.current_epoch:05}.png"),
@@ -445,7 +456,7 @@ class MyNet(pl.LightningModule):
                         fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
                         vmin=0, vmax=0.6)
 
-            if self.args.lossgradientstitching:
+            if self.args.lossgradientstitching and self.args.opttrans:
                 # Convert edge cuts to vertex values (separate for each tri => in order of tris)
                 cutedges = batch_parts['cutEdges'] # Indices of cut edges
                 vs, fs, es = mesh.export_soup()
@@ -480,12 +491,12 @@ class MyNet(pl.LightningModule):
         initfuv = None
         sourcedim = 3
         if self.args.init == "tutte":
-            initj = source.tuttej.squeeze()
-            initfuv = source.tuttefuv.squeeze()
+            initj = source.tuttej.squeeze().to(self.device)
+            initfuv = source.tuttefuv.squeeze().to(self.device)
         elif self.args.init == "isometric":
             sourcedim = 2
             initj = None # NOTE: this is guaranteed to be isometric, so don't need to composite for computing distortion
-            initfuv = source.isofuv.squeeze()
+            initfuv = source.isofuv.squeeze().to(self.device)
 
         # Debugging: tutte fuvs make sense
         if self.args.debug and self.args.init:
@@ -499,7 +510,7 @@ class MyNet(pl.LightningModule):
             plt.close(fig)
             plt.cla()
 
-        vertices = source.get_vertices()
+        vertices = source.get_vertices().to(self.device)
         faces = torch.from_numpy(source.get_source_triangles()).long().to(self.device)
 
         if self.args.no_poisson:
@@ -572,7 +583,7 @@ class MyNet(pl.LightningModule):
             "target_V": target.get_vertices().detach(),
             "source_V": source.get_vertices().detach(),
             "pred_V": pred_V.detach(),
-            "T": faces.detach().numpy(),
+            "T": faces.detach().cpu().numpy(),
             'source_ind': source.source_ind,
             'target_inds': target.target_inds,
             "lossdict": lossrecord,
@@ -591,27 +602,28 @@ class MyNet(pl.LightningModule):
             if self.args.debug:
                 import matplotlib.pyplot as plt
                 fig, axs = plt.subplots(figsize=(6, 4))
-                axs.triplot(ret['pred_V'][:,0], ret['pred_V'][:,1], ret['T'], linewidth=0.5)
+                axs.triplot(ret['pred_V'][:,0].detach().cpu().numpy(), ret['pred_V'][:,1].detach().cpu().numpy(), ret['T'], linewidth=0.5)
                 plt.axis('off')
                 plt.savefig(f"scratch/{source.source_ind}_fuv_pred.png")
                 plt.close(fig)
                 plt.cla()
 
         if validation:
+            # NOTE: We use isoj only to get the final UVs
             if self.args.init == "isometric":
-                initj = source.isoj.squeeze()
+                initj = source.isoj.squeeze().to(self.device)
 
             # NOTE: Post-process topology if running edge gradient optimization
             # Run poisson solve on updated topology
-            if self.args.lossgradientstitching:
+            if self.args.opttrans:
                 # Replace predV with L0 lstsq translations
                 from source_njf.utils import leastSquaresTranslation
 
                 vs = source.get_vertices().detach().cpu().numpy()
-                fs = faces.detach().numpy()
+                fs = faces.detach().cpu().numpy()
 
                 opttrans, cutedges, cutlength = leastSquaresTranslation(vs, fs, pred_V.detach().cpu().numpy(), return_cuts = True,
-                                                   iterate=True, debug=False, patience=5)
+                                                   iterate=True, debug=False, patience=5, cut_epsilon=self.args.cuteps)
                 ret['pred_V'] = (pred_V.detach() + torch.from_numpy(opttrans).to(self.device)).reshape(-1, 2)
                 ret['cutEdges'] = cutedges
                 ret['cutLength'] = cutlength
@@ -685,7 +697,7 @@ class MyNet(pl.LightningModule):
         #               global_step=self.global_step)
         # colors = self.colors(batch_parts["source_V"][0].cpu().numpy(), batch_parts["T"][0])
         #
-        # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
+        # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=False, on_epoch=True)
 
         # TODO: fix below
         # if self.args.xp_type == "uv":
@@ -695,7 +707,7 @@ class MyNet(pl.LightningModule):
         #             path = Path(self.logger.log_dir) / f"valid_batchidx_{idx:05}.png"
         #             plot_uv(path, batch_parts["target_V"][idx].squeeze().cpu().numpy(), batch_parts["T"][idx].squeeze())
 
-        # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=True, on_epoch=True)
+        # self.log('test_loss', loss.item(), logger=True, prog_bar=True, on_step=False, on_epoch=True)
         MAX_SOURCES_TO_SAVE = 11000000
         MAX_TARGETS_TO_SAVE = 10000000
 
@@ -890,8 +902,8 @@ class MyNet(pl.LightningModule):
         if self.args.optimizer == "sgd":
             optimizer = torch.optim.SGD(list(self.parameters()), lr=self.lr)
         # scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
-        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.5, threshold=0.0001,
-                                                                min_lr=1e-7, verbose=True)
+        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
+                                                                min_lr=1e-5, verbose=True)
 
         # Add translation as additional parameter
         # NOTE: With gradient stitching, we use L0 weighted least squares instead
@@ -1035,8 +1047,8 @@ def main(gen, args):
     #             plugins = pl.plugins.training_type.DDPSpawnPlugin(find_unused_parameters=False)
     #
 
-    checkpoint_callback = ModelCheckpoint(monitor="train_loss", mode="min", save_on_train_epoch_end=False,
-                                          dirpath=os.path.join(save_path, "ckpt"), every_n_train_steps=10)
+    checkpoint_callback = ModelCheckpoint(monitor="epoch", mode="max", save_on_train_epoch_end=True,
+                                          dirpath=os.path.join(save_path, "ckpt"), every_n_epochs=10)
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
     ################################ TRAINER #############################
@@ -1130,8 +1142,11 @@ def main(gen, args):
     trainer.fit(model, train_loader, valid_loader, ckpt_path=LOADING_CHECKPOINT if LOADING_CHECKPOINT else None)
 
     # Save UVs
+    device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+    model = model.to(device)
     for idx, data in enumerate(train_loader):
-        ret = model.my_step(data, idx, validation=True)
+        devdata = (data[0].to(model.device), data[1].to(model.device))
+        ret = model.my_step(devdata, idx, validation=True)
         source, target = data
         sourcepath = source.source_dir
         np.save(os.path.join(sourcepath, f"latest_preduv.npy"), ret['pred_V'].squeeze().detach().cpu().numpy())
