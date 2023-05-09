@@ -21,7 +21,7 @@ class SourceMesh:
     def __init__(self, source_ind, source_dir, extra_source_fields,
                  random_scale, ttype, use_wks=False, random_centering=False,
                 cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False,
-                initjinput=False, debug=False):
+                initjinput=False, debug=False, basistype=None):
         self.__use_wks = use_wks
         self.source_ind = source_ind
         # NOTE: This is the CACHE DIRECTORY
@@ -213,18 +213,21 @@ class SourceMesh:
                 # Random choice of local basis
                 # TODO: precompute the 6 possible local tris for each triangle
                 if new_init:
-                    basistype = np.random.choice(6, size=len(faces))
-                    local_tris = get_local_tris(vertices, faces, basis=basistype) # F x 3 x 2
+                    if new_init == "basis":
+                        basistype = np.random.choice(6, size=len(faces))
+                        local_tris = get_local_tris(vertices, faces, basis=basistype) # F x 3 x 2
+
+                    # Randomly sample rotations
+                    if new_init == "rot":
+                        thetas = np.random.uniform(low=0, high=2 * np.pi, size=len(local_tris))
+                        rotations = np.array([[[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]] for theta in thetas])
+                        local_tris = (np.matmul(rotations, local_tris.transpose(2,1))).transpose(2,1) # F x 3 x 2
+
                 else:
                     local_tris = get_local_tris(vertices, faces) # F x 3 x 2
 
                 # TODO: TRY PROJECTING TO PRINCIPAL CURVATURE BASIS INSTEAD
                 # TODO: random init -> 6 dfft local bases for each triangle, just sample from them (ab => [1,0], ba => [-1,0], ...)
-
-                # Randomly sample rotations
-                # thetas = np.random.uniform(low=0, high=2 * np.pi, size=len(local_tris))
-                # rotations = np.array([[[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]] for theta in thetas])
-                # local_tris = (np.matmul(rotations, local_tris.transpose(2,1))).transpose(2,1) # F x 3 x 2
 
                 # Randomly sample displacements
                 # NOTE: might need to alter the scales here

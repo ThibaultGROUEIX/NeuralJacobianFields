@@ -903,7 +903,7 @@ class MyNet(pl.LightningModule):
             optimizer = torch.optim.SGD(list(self.parameters()), lr=self.lr)
         # scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
         scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
-                                                                min_lr=1e-5, verbose=True)
+                                                                min_lr=1e-6, verbose=True)
 
         # Add translation as additional parameter
         # NOTE: With gradient stitching, we use L0 weighted least squares instead

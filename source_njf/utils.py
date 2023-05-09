@@ -90,6 +90,7 @@ def tutte_embedding(vertices, faces, fixclosed=False):
     return uv_init
 
 # Convert each triangle into local coordinates: A -> (0,0), B -> (x2, 0), C -> (x3, y3)
+# TODO: general projection onto local bases
 def get_local_tris(vertices, faces, basis=None, device=torch.device("cpu")):
     """basis: F x 1 array of integers from 1-6 indicating the basis type to initialize with
         (1) ab
@@ -113,9 +114,9 @@ def get_local_tris(vertices, faces, basis=None, device=torch.device("cpu")):
         e2 = fverts[torch.arange(len(basisx)), basise, :] - fverts[torch.arange(len(basisx)), basisog, :]
 
     # Vector parameters
-    s = torch.linalg.norm(e1, dim=1)
-    t = torch.linalg.norm(e2, dim=1)
-    angle = torch.acos(torch.sum(e1 / s[:, None] * e2 / t[:, None], dim=1))
+    s = torch.linalg.norm(e1, dim=1).double()
+    t = torch.linalg.norm(e2, dim=1).double()
+    angle = torch.acos(torch.sum(e1 / s[:, None] * e2 / t[:, None], dim=1)).double()
 
     # Position parameters
     x = torch.zeros(len(angle), 3).double()

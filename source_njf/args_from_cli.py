@@ -53,6 +53,7 @@ def get_arg_parser():
 	parser.add_argument("--globaltrans", help='also predict global translation per shape code', action="store_true")
 	parser.add_argument("--init", choices={"tutte", "isometric"}, help="initialize 2D embedding", default=None, type=str)
 	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization. -1 indicates new initialization for EACH load")
+	parser.add_argument("--basistype", choices={"basis", "rot"}, help="how to sample new triangle local basis", default="basis", type=str)
 	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
 							action="store_true")
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",

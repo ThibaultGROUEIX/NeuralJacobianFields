@@ -184,7 +184,7 @@ class DeformationDataset(Dataset):
                                 random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
                                 initjinput = self.args.initjinput, fft=self.args.fft, fft_dim=self.args.fft_dim,
                                 flatten=self.args.layer_normalization == "FLATTEN", debug=self.args.debug)
-            source.load(new_init=self.args.ninit == -1)
+            source.load(new_init= self.args.basistype if self.args.ninit == -1 else None)
             self.source = source
 
         # ==================================================================
