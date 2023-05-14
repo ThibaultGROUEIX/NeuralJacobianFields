@@ -209,7 +209,7 @@ class DeformationEncoder(torch.nn.Module):
         :param dataset: Dataset object that returns batches
         :return: integer specifying code lenth
         '''
-        if self.__args.layer_normalization == "FLATTEN":
+        if self.__args.noencoder:
             return 0
 
         b = dataset[0]

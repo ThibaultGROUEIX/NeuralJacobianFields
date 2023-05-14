@@ -124,11 +124,19 @@ class SourceMesh:
         self.poisson = self.mesh_processor.diff_ops.poisson_solver
 
         # Initialize random flat vector if set
-        if self.flatten:
+        if self.flatten == "random":
             self.flat_vector = torch.rand(1, len(self.mesh_processor.faces) * 9) * 100
 
-        # First check if initialization cached
+        # Aggregate inputs into 9-width vectors per face
+        if self.flatten == "input":
+            nchannels = self.centroids_and_normals.shape[1]
+            gsize = int(np.ceil(nchannels/9))
+            newchannels = []
+            for i in range(9):
+                newchannels.append(torch.sum(self.centroids_and_normals[:,i*gsize:(i+1)*gsize], dim=1))
+            self.flat_vector = torch.stack(newchannels, dim=1).reshape(1, -1)
 
+        # First check if initialization cached
         # Precompute Tutte if set
         if self.init == "tutte":
             if os.path.exists(os.path.join(self.source_dir, "tuttefuv.pt")) and \
@@ -146,6 +154,8 @@ class SourceMesh:
                 device = vertices.device
                 faces = self.get_source_triangles()
                 fverts = vertices[faces].transpose(1,2)
+
+                # TODO: GENERATE RANDOM CUTS IF SET
 
                 self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), self.get_source_triangles(), fixclosed=True)).unsqueeze(0) # 1 x F x 2
 
@@ -211,14 +221,20 @@ class SourceMesh:
                 fverts = vertices[faces]
 
                 # Random choice of local basis
-                # TODO: precompute the 6 possible local tris for each triangle
                 if new_init:
+                    if new_init == "global":
+                        local_tris = get_local_tris(vertices, faces, basis=None) # F x 3 x 2
+                        theta = np.random.uniform(low=0, high=2 * np.pi, size=1)
+                        rotationmat = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+                        local_tris = (np.matmul(rotationmat.reshape(1, 2, 2), local_tris.transpose(2,1))).transpose(2,1) # F x 3 x 2
+
                     if new_init == "basis":
                         basistype = np.random.choice(6, size=len(faces))
                         local_tris = get_local_tris(vertices, faces, basis=basistype) # F x 3 x 2
 
                     # Randomly sample rotations
                     if new_init == "rot":
+                        local_tris = get_local_tris(vertices, faces, basis=None) # F x 3 x 2
                         thetas = np.random.uniform(low=0, high=2 * np.pi, size=len(local_tris))
                         rotations = np.array([[[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]] for theta in thetas])
                         local_tris = (np.matmul(rotations, local_tris.transpose(2,1))).transpose(2,1) # F x 3 x 2

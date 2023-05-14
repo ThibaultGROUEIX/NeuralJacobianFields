@@ -118,16 +118,17 @@ def get_local_tris(vertices, faces, basis=None, device=torch.device("cpu")):
     t = torch.linalg.norm(e2, dim=1).double()
     angle = torch.acos(torch.sum(e1 / s[:, None] * e2 / t[:, None], dim=1)).double()
 
-    # Position parameters
-    x = torch.zeros(len(angle), 3).double()
-    x[torch.arange(len(angle)), basisog] = s
-    x[torch.arange(len(angle)),basise] = t * torch.cos(angle)
+    if basis is None:
+        x = torch.column_stack([torch.zeros(len(angle)).to(device), s, t * torch.cos(angle)])
+        y = torch.column_stack([torch.zeros(len(angle)).to(device), torch.zeros(len(angle)).to(device), t * torch.sin(angle)])
+    else:
+        # Position parameters
+        x = torch.zeros(len(angle), 3).double()
+        x[torch.arange(len(angle)), basisog] = s
+        x[torch.arange(len(angle)),basise] = t * torch.cos(angle)
 
-    y = torch.zeros(len(angle), 3).double()
-    y[torch.arange(len(angle)), basise] = t * torch.sin(angle)
-
-    # x = torch.column_stack([torch.zeros(len(angle)).to(device), s, t * torch.cos(angle)])
-    # y = torch.column_stack([torch.zeros(len(angle)).to(device), torch.zeros(len(angle)).to(device), t * torch.sin(angle)])
+        y = torch.zeros(len(angle), 3).double()
+        y[torch.arange(len(angle)), basise] = t * torch.sin(angle)
 
     local_tris = torch.stack((x, y), dim=-1).reshape(len(angle), 3, 2)
     return local_tris

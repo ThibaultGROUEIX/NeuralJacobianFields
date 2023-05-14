@@ -80,9 +80,9 @@ class UVLoss:
         # Distortion
         distortionenergy = None
         if self.args.lossdistortion == "arap":
+            # TODO: weight by 3D face areas?
             local_tris = get_local_tris(vertices, faces, device=self.device)
-            fareas = meshArea2D(vertices, faces, return_fareas=True)
-            distortionenergy = fareas * arap(local_tris, faces, uv,
+            distortionenergy = arap(local_tris, faces, paramtris=uv,
                                 device=self.device, renormalize=False,
                                 return_face_energy=True, timeit=False)
             self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
@@ -113,9 +113,9 @@ class UVLoss:
         if self.args.lossedgeseparation:
             edgeseploss = torch.sum(uvseparation(vertices, faces, uv, loss= self.args.eseploss), dim=[1,2])
             # Relaxation
-            # edgeseploss = torch.log(edgeseploss + 1)
-            edgeseploss = (edgeseploss * edgeseploss)/(edgeseploss * edgeseploss + seplossdelta)
-            loss += self.args.seplossweight * torch.mean(edgeseploss)
+            if self.args.stitchrelax:
+                edgeseploss = (edgeseploss * edgeseploss)/(edgeseploss * edgeseploss + seplossdelta)
+            loss += self.args.stitchlossweight * torch.mean(edgeseploss)
             self.currentloss[self.count]['edgeseploss'] = edgeseploss.detach().cpu().numpy()
 
         if self.args.lossgradientstitching:
@@ -123,7 +123,11 @@ class UVLoss:
                 edgegradloss = torch.sum(uvgradloss(vertices, faces, uv), dim=1)
             elif self.args.lossgradientstitching == "split":
                 edgegradloss = splitgradloss(vertices, faces, uv, cosine_weight=1, mag_weight=1)
-            loss += self.args.gradlossweight * torch.mean(edgegradloss)
+
+            if self.args.stitchrelax:
+                edgegradloss = (edgegradloss * edgegradloss)/(edgegradloss * edgegradloss + seplossdelta)
+
+            loss += self.args.stitchlossweight * torch.mean(edgegradloss)
             self.currentloss[self.count]['edgegradloss'] = edgegradloss.detach().cpu().numpy()
 
             # If transuv given, then also compute the edge separation loss
@@ -327,7 +331,7 @@ def splitgradloss(vs, fs, uv, cosine_weight=1, mag_weight=1):
 
     return elens * (cosine_weight * cosine_loss + mag_weight * mag_loss)
 
-def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, renormalize=True,
+def arap(local_tris, faces, param=None, return_face_energy=True, paramtris=None, renormalize=True,
          face_weights=None, normalize_filter=0, device=torch.device("cpu"), verbose=False, timeit=False, **kwargs):
     if paramtris is None:
         paramtris = param[faces]

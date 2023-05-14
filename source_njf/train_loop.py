@@ -58,7 +58,22 @@ class MyNet(pl.LightningModule):
 
         # NOTE: code dim refers to the pointnet encoding. Point_dim is centroid position (also potentially fourier features)
         layer_normalization = self.get_layer_normalization_type()
-        if layer_normalization == "IDENTITY":
+        if hasattr(self.args, "dense") and self.args.dense:
+            print("==== We are predicting FLAT vectors! ==== ")
+            # NOTE: In this case we can initialize random vector input of SAME channels and keep channels constant throughout
+            channels = point_dim + code_dim
+            self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, channels),
+                                                    nn.LayerNorm(normalized_shape=channels),
+                                                    nn.ReLU(),
+                                                    nn.Linear(channels, channels),
+                                                    nn.LayerNorm(normalized_shape=channels),
+                                                    nn.ReLU(),
+                                                    nn.Linear(channels, channels),
+                                                    nn.LayerNorm(normalized_shape=channels),
+                                                    nn.ReLU(),
+                                                    nn.Linear(channels, channels),
+                                                    )
+        elif layer_normalization == "IDENTITY":
             # print("Using IDENTITY (no normalization) in per_face_decoder!")
             self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, 128),
                                                   nn.Identity(),
@@ -133,16 +148,6 @@ class MyNet(pl.LightningModule):
                                                   nn.LayerNorm(normalized_shape=128),
                                                   nn.ReLU(),
                                                   nn.Linear(128, 9))
-        elif layer_normalization == "FLATTEN":
-            print("==== We are predicting FLAT vectors! ==== ")
-            # NOTE: In this case we can initialize random vector input of SAME channels and keep channels constant throughout
-            channels = point_dim + code_dim
-            self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, channels),
-                                                    nn.ReLU(),
-                                                    nn.Linear(channels, channels),
-                                                    nn.ReLU(),
-                                                    nn.Linear(channels, channels),
-                                                    )
         else:
             raise Exception("unknown normalization method")
 
@@ -196,10 +201,11 @@ class MyNet(pl.LightningModule):
 		:return: BxTx3x3 a tensor of 3x3 jacobians, per T tris, per B targets in batch
 		'''
         # extract the encoding of the source and target
-        if not self.args.layer_normalization == "FLATTEN":
-            codes = self.extract_code(source, target)
-        else:
+        if self.args.noencoder:
             codes = None
+        else:
+            codes = self.extract_code(source, target)
+
         # get the network predictions, a BxTx3x3 tensor of 3x3 jacobians, per T tri, per B target in batch
         return self.predict_jacobians_from_codes(codes, source)
 
@@ -224,7 +230,7 @@ class MyNet(pl.LightningModule):
         res = self.forward(stacked)
 
         # Flat mode
-        if codes is None:
+        if self.args.dense:
             ret = res.reshape(res.shape[0], source.mesh_processor.faces.shape[0], 3, 3)
 
             if self.__IDENTITY_INIT:
@@ -286,9 +292,9 @@ class MyNet(pl.LightningModule):
         # Log losses
         for key, val in lossrecord[0].items():
             if "loss" in key:
-                self.log(key, np.sum(val), logger=True, prog_bar=False, batch_size=1, on_epoch=True, on_step=False)
+                self.log(key, np.mean(val), logger=True, prog_bar=False, batch_size=1, on_epoch=True, on_step=False)
 
-        if self.args.debug:
+        if self.args.mem:
             # Check memory consumption
             # Get GPU memory usage
             t = torch.cuda.get_device_properties(0).total_memory
@@ -391,7 +397,7 @@ class MyNet(pl.LightningModule):
         # Log losses
         for key, val in lossdict[0].items():
             if "loss" in key:
-                self.log(f"val_{key}", np.sum(val), logger=True, prog_bar=False, batch_size=1, on_epoch=True, on_step=False)
+                self.log(f"val_{key}", np.mean(val), logger=True, prog_bar=False, batch_size=1, on_epoch=True, on_step=False)
 
         # Log path
         source, target = batch
@@ -404,6 +410,10 @@ class MyNet(pl.LightningModule):
 
         # Save latest predictions
         np.save(os.path.join(source_path, f"latest_preduv.npy"), batch_parts['pred_V'].squeeze().detach().cpu().numpy())
+
+        if self.args.opttrans:
+            np.save(os.path.join(source_path, f"latest_preduv.npy"), batch_parts['pred_V_opttrans'].squeeze().detach().cpu().numpy())
+
         np.save(os.path.join(source_path, f"latest_predt.npy"), batch_parts['T'])
 
         if self.args.no_poisson:
@@ -424,6 +434,15 @@ class MyNet(pl.LightningModule):
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
                         [os.path.join(save_path, f"{key}_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
             self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
+
+            if "pred_V_opttrans" in batch_parts.keys():
+                plot_uv(save_path, f"opttrans epoch {self.current_epoch:05}", batch_parts["pred_V_opttrans"].squeeze().detach().cpu().numpy(),
+                            batch_parts["T"].squeeze(), losses=lossdict[0], ftoe=ftoe)
+
+                # Log the plotted imgs
+                images = [os.path.join(save_path, f"opttrans_epoch_{self.current_epoch:05}.png")] + \
+                            [os.path.join(save_path, f"{key}_opttrans_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+                self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
             for key, val in lossdict[0].items():
@@ -553,7 +572,6 @@ class MyNet(pl.LightningModule):
         # Drop last dimension of restricted J
         if pred_J_restricted.shape[2] == 3:
             pred_J_restricted = pred_J_restricted[:,:,:2]
-
         GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target)
 
         if UNIT_TEST_POISSON_SOLVE:
@@ -565,9 +583,20 @@ class MyNet(pl.LightningModule):
         # HACK: lerp seplossdelta
         if self.args.seploss_schedule:
             ratio = self.global_step/self.trainer.max_epochs
-            seplossdelta = ratio * self.args.seplossdelta + (1 - ratio) * self.args.seplossdelta_min
+            seplossdelta = ratio * self.args.seplossdelta_min + (1 - ratio) * self.args.seplossdelta
         else:
             seplossdelta = self.args.seplossdelta
+
+        ## Stitching loss schedule
+        if self.args.stitchloss_schedule == "linear":
+            ratio = self.global_step/self.trainer.max_epochs
+            stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
+            self.args.stitchlossweight = stitchweight
+        elif self.args.stitchloss_schedule == "cosine":
+            # TODO
+            ratio = self.global_step/self.trainer.max_epochs
+            stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
+            self.args.stitchlossweight = stitchweight
 
         # NOTE: pred_V should be F x 3 x 2
         loss = self.lossfcn.computeloss(vertices, faces, pred_V, pred_J[:,:2,:sourcedim], initjacobs=initj,
@@ -624,7 +653,7 @@ class MyNet(pl.LightningModule):
 
                 opttrans, cutedges, cutlength = leastSquaresTranslation(vs, fs, pred_V.detach().cpu().numpy(), return_cuts = True,
                                                    iterate=True, debug=False, patience=5, cut_epsilon=self.args.cuteps)
-                ret['pred_V'] = (pred_V.detach() + torch.from_numpy(opttrans).to(self.device)).reshape(-1, 2)
+                ret['pred_V_opttrans'] = (pred_V.detach() + torch.from_numpy(opttrans).to(self.device)).reshape(-1, 2)
                 ret['cutEdges'] = cutedges
                 ret['cutLength'] = cutlength
 
@@ -1036,7 +1065,7 @@ def main(gen, args):
         else:
             print(f"Warning: No wandb record found in {os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')}!. Starting log from scratch...")
 
-    logger = WandbLogger(project='njfwand', name=args.expname, save_dir=os.path.join(args.outputdir, args.expname), log_model='all' if not args.debug else False,
+    logger = WandbLogger(project=args.projectname, name=args.expname, save_dir=os.path.join(args.outputdir, args.expname), log_model='all' if not args.debug else False,
                          offline=args.debug, resume='must' if args.continuetrain and id is not None else 'allow', id = id)
 
     # if args.gpu_strategy:
@@ -1107,6 +1136,14 @@ def main(gen, args):
         assert (isinstance(gen, DeformationEncoder.DeformationEncoder))
         model = MyNet(gen, gen.get_code_length(train_dataset), point_dim=train_dataset.get_point_dim(), args=args)
 
+    # NOTE: Network not initializing with correct device!!!
+    if has_gpu:
+        model.to(torch.device("cuda:0"))
+        model.lossfcn.device = torch.device("cuda:0")
+    else:
+        model.to(torch.device("cpu"))
+        model.lossfcn.device = torch.device("cpu")
+
     model.type(use_dtype)
     model.lr = args.lr
     # trainer.tune(model)
@@ -1138,6 +1175,13 @@ def main(gen, args):
         print('&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&& TEST &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&')
         trainer.test(model, train_loader, ckpt_path=LOADING_CHECKPOINT if LOADING_CHECKPOINT else None)
         return
+
+    # If loss args doesn't have stitchrelax, then add it
+    if not hasattr(model.lossfcn.args, "stitchrelax"):
+        model.lossfcn.args.stitchrelax = True
+
+    if not hasattr(model.lossfcn.args, "stitchlossweight"):
+        model.lossfcn.args.stitchlossweight = 1
 
     trainer.fit(model, train_loader, valid_loader, ckpt_path=LOADING_CHECKPOINT if LOADING_CHECKPOINT else None)
 

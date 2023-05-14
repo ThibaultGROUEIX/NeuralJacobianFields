@@ -16,6 +16,9 @@ def get_arg_parser():
 	"""
 	parser = argparse.ArgumentParser()
 
+	parser.add_argument("--projectname",
+						help='name of project (saved in wandb)',
+						type = str, default='njfwand')
 	parser.add_argument("--expname",
 						help='name of experiment folder',
 						type = str, required=True)
@@ -39,6 +42,7 @@ def get_arg_parser():
 	parser.add_argument("--fft_dim", type=int,
 							help='fourier features dimension',
 							default=256)
+	parser.add_argument("--noencoder", help="no encoder. TURN THIS ON IF YOU DONT WANT TO TRAIN THE ENCODER",action="store_true")
 
 	### TRAINING
 	parser.add_argument("--continuetrain", help='continue training', action="store_true")
@@ -53,7 +57,7 @@ def get_arg_parser():
 	parser.add_argument("--globaltrans", help='also predict global translation per shape code', action="store_true")
 	parser.add_argument("--init", choices={"tutte", "isometric"}, help="initialize 2D embedding", default=None, type=str)
 	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization. -1 indicates new initialization for EACH load")
-	parser.add_argument("--basistype", choices={"basis", "rot"}, help="how to sample new triangle local basis", default="basis", type=str)
+	parser.add_argument("--basistype", choices={"basis", "rot", "global"}, help="how to sample new triangle local basis", default="basis", type=str)
 	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
 							action="store_true")
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
@@ -97,13 +101,17 @@ def get_arg_parser():
 	parser.add_argument("--lossgradientstitching", choices={'l2', 'split'}, help = "use gradient stitching loss", default=None)
 	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
 
-	parser.add_argument("--gradlossweight", help="weight for the uv grad loss", default=1, type=float)
+	parser.add_argument("--stitchlossweight", help="weight for edge stitching losses", default=1, type=float)
+	parser.add_argument("--stitchlossweight_min", help="max weight for edge stitching losses", default=0, type=float)
+	parser.add_argument("--stitchlossweight_max", help="max weight for edge stitching losses", default=1, type=float)
+	parser.add_argument("--stitchloss_schedule", type=str, choices={'linear', 'cosine'}, help = "type of schedule for edgeloss", default=None)
+	parser.add_argument("--stitchrelax", help = "l0 relaxation on stitching loss", action="store_true")
+
 	parser.add_argument("--lossedgeseparation", help = "use edge separation loss", action="store_true")
 	parser.add_argument("--eseploss", type=str, choices={'l1', 'l2'}, help = "type of regression loss for edge sep", default="l1")
-	parser.add_argument("--seplossdelta", help="initial delta for edge separation loss", default=0.1, type=float)
+	parser.add_argument("--seplossdelta", help="initial delta for edge separation loss", default=0.5, type=float)
 	parser.add_argument("--seplossdelta_min", help="min delta for edge separation loss", default=0.01, type=float)
 	parser.add_argument("--seploss_schedule", help="apply linear schedule to the separation loss delta parameter", action="store_true")
-	parser.add_argument("--seplossweight", help="weight for the separation loss", default=1, type=float)
 	parser.add_argument("--lossautocut", help = "use counting loss over distortion energy", action="store_true")
 
 	parser.add_argument("--gpu_strategy",help ="default: no op (whatever lightning does by default). ddp: use the ddp multigpu startegy; spawn: use the ddpspawn strategy",default=None,choices={'ddp','ddpspawn', 'cpuonly'})
@@ -111,7 +119,8 @@ def get_arg_parser():
 	parser.add_argument("--n_gpu", help="num of gpus, default is all", type=int, default=-1)
 	parser.add_argument("--n_devices", help="more general version of n_gpu, defaults to cpu", type=int, default=1)
 	parser.add_argument("--pointnet_layer_normalization",help = "type of normalization for the PointNet encoder's layers",default="GROUPNORM",type=str,choices={'GROUPNORM','BATCHNORM','IDENTITY'})
-	parser.add_argument("--layer_normalization",help = "type of normalization for the decoder's layers",default="GROUPNORM",type=str,choices={'GROUPNORM','GROUPNORM2', 'BATCHNORM','IDENTITY', 'LAYERNORM', 'FLATTEN'})
+	parser.add_argument("--layer_normalization",help = "type of normalization for the decoder's layers",default="GROUPNORM",type=str,choices={'GROUPNORM','GROUPNORM2', 'BATCHNORM','IDENTITY', 'LAYERNORM'})
+	parser.add_argument("--dense",help = "type of dense MLP to use",default=None,type=str,choices={'random', 'input'})
 	parser.add_argument("--overfit_one_batch", help="overfit a particular batch of the training data",action="store_true")
 	parser.add_argument("--xp_type", help ="only runs the validation",default=None,type=str)
 	parser.add_argument("--test", help="run in test mode", action="store_true")
