@@ -60,9 +60,17 @@ class MyNet(pl.LightningModule):
         layer_normalization = self.get_layer_normalization_type()
         if hasattr(self.args, "dense") and self.args.dense:
             print("==== We are predicting FLAT vectors! ==== ")
-            # NOTE: In this case we can initialize random vector input of SAME channels and keep channels constant throughout
-            channels = point_dim + code_dim
+            if self.args.dense == "xyz":
+                channels = (point_dim + code_dim) * 3
+            else:
+                channels = point_dim + code_dim
             self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, channels),
+                                                    nn.LayerNorm(normalized_shape=channels),
+                                                    nn.ReLU(),
+                                                    nn.Linear(channels, channels),
+                                                    nn.LayerNorm(normalized_shape=channels),
+                                                    nn.ReLU(),
+                                                    nn.Linear(channels, channels),
                                                     nn.LayerNorm(normalized_shape=channels),
                                                     nn.ReLU(),
                                                     nn.Linear(channels, channels),
@@ -216,8 +224,10 @@ class MyNet(pl.LightningModule):
 		:param single_source_batch: the batch
 		:return:BxTx3x3 a tensor of 3x3 jacobians, per T tris, per B targets in batch
 		'''
-        if codes is None:
+        if self.args.dense:
             stacked = source.flat_vector
+        elif codes is None:
+            stacked = source.get_centroids_and_normals()
         else:
             # take all encodings z_i of targets, and all centroids c_j of triangles, and create a cartesian product of the two as a 2D tensor so each sample in it is a vector with rows (z_i|c_j)
             net_input = PerCentroidBatchMaker.PerCentroidBatchMaker(codes, source.get_centroids_and_normals(), args=self.args)
@@ -442,7 +452,7 @@ class MyNet(pl.LightningModule):
                 # Log the plotted imgs
                 images = [os.path.join(save_path, f"opttrans_epoch_{self.current_epoch:05}.png")] + \
                             [os.path.join(save_path, f"{key}_opttrans_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
-                self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
+                self.logger.log_image(key='opttrans uvs', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
             for key, val in lossdict[0].items():
@@ -930,9 +940,9 @@ class MyNet(pl.LightningModule):
             optimizer = torch.optim.Adam(list(self.parameters()), lr=self.lr)
         if self.args.optimizer == "sgd":
             optimizer = torch.optim.SGD(list(self.parameters()), lr=self.lr)
-        # scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
-        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
-                                                                min_lr=1e-6, verbose=True)
+        scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
+        # scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
+        #                                                         min_lr=1e-6, verbose=True)
 
         # Add translation as additional parameter
         # NOTE: With gradient stitching, we use L0 weighted least squares instead
@@ -945,10 +955,10 @@ class MyNet(pl.LightningModule):
                 init_translate = torch.ones(faces.shape[0], 1, 2).to(self.device).float() * 0.5
                 init_translate.requires_grad_()
                 additional_parameters = [init_translate]
-                optimizer.add_param_group({"params": additional_parameters, 'lr': self.lr * 100}) # Direct optimization needs to be 100x larger
+                optimizer.add_param_group({"params": additional_parameters, 'lr': self.lr}) # Direct optimization needs to be 100x larger
 
                 # HACK: Need to also extend scheduler's min_lrs
-                scheduler1.min_lrs.append(1e-5)
+                # scheduler1.min_lrs.append(1e-6)
 
         return {"optimizer": optimizer,
                 "lr_scheduler": {
@@ -1091,6 +1101,7 @@ def main(gen, args):
                          enable_model_summary=False,
                          enable_progress_bar=True,
                          num_nodes=1,
+                         gradient_clip_val=args.gradclip,
                          deterministic= args.deterministic,
                          strategy='ddp',
                          callbacks=[checkpoint_callback,lr_monitor])
@@ -1248,6 +1259,8 @@ def main(gen, args):
                 imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
                         save_all=True, duration=100, loop=0, disposal=2)
 
+                model.logger.log_image(key=f"{key} gif", images=[fp_out])
+
                 # Mesh viz
                 fp_in = f"{vispath}/frames/{key}_mesh_*.png"
                 fp_out = f"{vispath}/train_{key}_mesh.gif"
@@ -1317,4 +1330,6 @@ def main(gen, args):
             imgs = [img.resize((basewidth, newheight)) for img in imgs]
             imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
                     save_all=True, duration=100, loop=0, disposal=2)
+
+            model.logger.log_image(key=f"poiss gif", images=[fp_out])
     # ================ #

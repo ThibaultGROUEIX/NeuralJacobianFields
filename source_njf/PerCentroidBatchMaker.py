@@ -26,7 +26,7 @@ class PerCentroidBatchMaker:
 
         #want to generate Ntargets x trilen x (6 + codelen codes)
         #first make into right shape
-        codes = self.__codes.unsqueeze(1)#dim for tris
+        codes = self.__codes.unsqueeze(1) #dim for tris
         centroids_and_normals = self.__centroids_and_normals.unsqueeze(0)#dim for codes
         codes = codes.expand((-1,self.__tri_len,-1))
         centroids_and_normals = centroids_and_normals.expand((self.__target_len,-1,-1))

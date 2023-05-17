@@ -127,6 +127,10 @@ class SourceMesh:
         if self.flatten == "random":
             self.flat_vector = torch.rand(1, len(self.mesh_processor.faces) * 9) * 100
 
+        if self.flatten == "xyz":
+            # Initialize with all triangle centroid positions
+            self.flat_vector = self.centroids_and_normals[:,:3].reshape(1, -1)
+
         # Aggregate inputs into 9-width vectors per face
         if self.flatten == "input":
             nchannels = self.centroids_and_normals.shape[1]

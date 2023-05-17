@@ -53,7 +53,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                 if "edge" in key and ftoe is not None:
                     ftoeloss = np.array([np.sum(val[es]) for es in ftoe])
                     fig, axs = plt.subplots(figsize=(5, 5))
-                    fig.suptitle(f"{name}\nSum {key}: {np.sum(val):0.4f}")
+                    fig.suptitle(f"{name}\Avg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
                     axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], ['black'] * len(pred_vertices), triangles=triangles, cmap=cmap,
                                 linewidth=0.5, vmin=cmin, vmax=cmax, facecolors=ftoeloss, edgecolor='black')
@@ -63,7 +63,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     plt.close()
                 else:
                     fig, axs = plt.subplots(figsize=(5,5))
-                    fig.suptitle(f"{name}\nSum {key}: {np.sum(val):0.4f}")
+                    fig.suptitle(f"{name}\Avg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
                     axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles=triangles, facecolors=val[:len(triangles)], cmap=cmap,
                                 linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor="black")
