@@ -940,9 +940,9 @@ class MyNet(pl.LightningModule):
             optimizer = torch.optim.Adam(list(self.parameters()), lr=self.lr)
         if self.args.optimizer == "sgd":
             optimizer = torch.optim.SGD(list(self.parameters()), lr=self.lr)
-        scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
-        # scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
-        #                                                         min_lr=1e-6, verbose=True)
+        # scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
+        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
+                                                                min_lr=1e-7, verbose=True)
 
         # Add translation as additional parameter
         # NOTE: With gradient stitching, we use L0 weighted least squares instead
@@ -958,7 +958,7 @@ class MyNet(pl.LightningModule):
                 optimizer.add_param_group({"params": additional_parameters, 'lr': self.lr}) # Direct optimization needs to be 100x larger
 
                 # HACK: Need to also extend scheduler's min_lrs
-                scheduler1.min_lrs.append(1e-6)
+                scheduler1.min_lrs.append(1e-7)
 
         return {"optimizer": optimizer,
                 "lr_scheduler": {
@@ -1330,6 +1330,4 @@ def main(gen, args):
             imgs = [img.resize((basewidth, newheight)) for img in imgs]
             imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
                     save_all=True, duration=100, loop=0, disposal=2)
-
-            model.logger.log_image(key=f"poiss gif", images=[fp_out])
     # ================ #
