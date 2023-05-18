@@ -26,7 +26,7 @@ class MeshProcessor:
     '''
     def __init__(self, vertices, faces, ttype, source_dir=None,from_file = False,
                  cpuonly=False, load_wks_samples=False, load_wks_centroids=False,
-                compute_splu=True, load_splu=False):
+                compute_splu=True, load_splu=False, top_k_eig=50):
         '''
         :param vertices:
         :param faces:
@@ -67,26 +67,30 @@ class MeshProcessor:
         self.load_wks_centroids = load_wks_centroids
         self.compute_splu = compute_splu
         self.load_splu = load_splu
+        self.top_k_eig = top_k_eig
 
     @staticmethod
-    def meshprocessor_from_directory(source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False):
+    def meshprocessor_from_directory(source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False, top_k_eig=50):
         vertices = np.load(os.path.join(source_dir, "vertices.npy"))
         faces = np.load(os.path.join(source_dir, "faces.npy"))
-        return MeshProcessor(vertices,faces,ttype,source_dir, cpuonly=cpuonly, load_wks_samples=load_wks_samples, load_wks_centroids=load_wks_centroids, compute_splu=False)
+        return MeshProcessor(vertices,faces,ttype,source_dir, cpuonly=cpuonly, load_wks_samples=load_wks_samples,
+                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig)
 
     @staticmethod
-    def meshprocessor_from_file(fname, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False):
+    def meshprocessor_from_file(fname, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False, top_k_eig=50):
         if fname[-4:] == '.obj':
             V, _, _, F, _, _ = igl.read_obj(fname)
         elif fname[-4:] == '.off':
             V,F,_ = igl.read_off(fname)
         elif fname[-4:] == '.ply':
             V,F = igl.read_triangle_mesh(fname)
-        return MeshProcessor(V,F,ttype,os.path.dirname(fname),True, cpuonly=cpuonly, load_wks_samples=load_wks_samples, load_wks_centroids=load_wks_centroids, compute_splu=False)
+        return MeshProcessor(V,F,ttype,os.path.dirname(fname),True, cpuonly=cpuonly, load_wks_samples=load_wks_samples,
+                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig)
 
     @staticmethod
-    def meshprocessor_from_array(vertices, faces, source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False):
-        return MeshProcessor(vertices,faces,ttype,source_dir, cpuonly=cpuonly, load_wks_samples=load_wks_samples, load_wks_centroids=load_wks_centroids, compute_splu=False)
+    def meshprocessor_from_array(vertices, faces, source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False, top_k_eig=50):
+        return MeshProcessor(vertices,faces,ttype,source_dir, cpuonly=cpuonly, load_wks_samples=load_wks_samples,
+                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig)
 
 
 
@@ -281,7 +285,7 @@ class MeshProcessor:
     def computeWKS(self):
         if self.faces_wks is  None or self.vert_wks is  None:
             st = time()
-            w = WaveKernelSignature(self.vertices, self.faces, top_k_eig=50)
+            w = WaveKernelSignature(self.vertices, self.faces, top_k_eig=self.top_k_eig)
             w.compute()
             print(f"Ellapsed {time() - st}")
             wk = w.wks

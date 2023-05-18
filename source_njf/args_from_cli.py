@@ -89,12 +89,16 @@ def get_arg_parser():
 							action="store_true")
 	parser.add_argument('--no_wks', help='if specified, don''t give pointnet wks',
 						action="store_true")
+	parser.add_argument( "--top_k_eig",
+							help=f"number of eigenvalues to compute for wks ",
+							type=int, default=50)
 	parser.add_argument("--lr", help="learning rate, default is 1e-4", default=1e-4,
 						type=float)
 	parser.add_argument("--normalize_jac_loss", help="normalize jacobians 1/norm(GT) when comparing them, default is false",action="store_true")
 	parser.add_argument("--precision",help ="the precision we work in, should be 16,32,or 64 (default)",default=64,type=int)
 	parser.add_argument("--vertex_loss_weight", help="the weight to place on the vertex loss (jacobian loss is unweighted) default = 1.0", default=1.0, type=float)
-	###### POSTPROCESS ######
+
+ 	###### POSTPROCESS ######
 	parser.add_argument("--opttrans", help = "predict l0 translation and visualize", action="store_true")
 	###### LOSSES ######
 	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet', 'edge'})

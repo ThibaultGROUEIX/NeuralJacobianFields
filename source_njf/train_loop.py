@@ -958,7 +958,7 @@ class MyNet(pl.LightningModule):
                 optimizer.add_param_group({"params": additional_parameters, 'lr': self.lr}) # Direct optimization needs to be 100x larger
 
                 # HACK: Need to also extend scheduler's min_lrs
-                # scheduler1.min_lrs.append(1e-6)
+                scheduler1.min_lrs.append(1e-6)
 
         return {"optimizer": optimizer,
                 "lr_scheduler": {

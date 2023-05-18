@@ -21,7 +21,7 @@ class SourceMesh:
     def __init__(self, source_ind, source_dir, extra_source_fields,
                  random_scale, ttype, use_wks=False, random_centering=False,
                 cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False,
-                initjinput=False, debug=False, basistype=None):
+                initjinput=False, debug=False, top_k_eig=50):
         self.__use_wks = use_wks
         self.source_ind = source_ind
         # NOTE: This is the CACHE DIRECTORY
@@ -42,6 +42,7 @@ class SourceMesh:
         self.initjinput = initjinput
         self.flatten = flatten
         self.debug = debug
+        self.top_k_eig = top_k_eig
 
         self.fft = None
         if fft:
@@ -335,12 +336,23 @@ class SourceMesh:
 
     def load(self, source_v=None, source_f=None, new_init=False):
         if source_v is not None and source_f is not None:
-            self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_array(source_v,source_f, self.source_dir, self.__ttype, cpuonly=self.cpuonly, load_wks_samples=self.__use_wks, load_wks_centroids=self.__use_wks)
+            self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_array(source_v,source_f, self.source_dir, self.__ttype,
+                                                                                       cpuonly=self.cpuonly, load_wks_samples=self.__use_wks,
+                                                                                       load_wks_centroids=self.__use_wks,
+                                                                                       top_k_eig=self.top_k_eig)
         else:
             if os.path.isdir(self.source_dir):
-                self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_directory(self.source_dir, self.__ttype, cpuonly=self.cpuonly, load_wks_samples=self.__use_wks, load_wks_centroids=self.__use_wks)
+                self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_directory(self.source_dir, self.__ttype,
+                                                                                               cpuonly=self.cpuonly,
+                                                                                               load_wks_samples=self.__use_wks,
+                                                                                               load_wks_centroids=self.__use_wks,
+                                                                                               top_k_eig=self.top_k_eig)
             else:
-                self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_file(self.source_dir, self.__ttype, cpuonly=self.cpuonly, load_wks_samples=self.__use_wks, load_wks_centroids=self.__use_wks)
+                self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_file(self.source_dir, self.__ttype,
+                                                                                          cpuonly=self.cpuonly,
+                                                                                          load_wks_samples=self.__use_wks,
+                                                                                          load_wks_centroids=self.__use_wks,
+                                                                                          top_k_eig=self.top_k_eig)
         self.__init_from_mesh_data(new_init)
 
     def get_point_dim(self):
