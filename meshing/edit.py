@@ -397,6 +397,11 @@ class EdgeCut():
     def __init__(
         self, mesh, e_i, startv, splitf, cutbdry=False, e2_i = None, splitf2=None
     ):
+        """ e_i: index of edge to cut
+            startv: where to start the cut (determines the direction of cut)
+            splitf: index of face to assign the new primitives to (must be adjacent to the cut edge)
+            e2_i: index of second edge to cut (must be specified if cutting middle of mesh)
+            splitf2: index of adjacent face on second cut edge to assign new primitives """
         self.mesh = mesh
         self.e_i = e_i
         self.cutbdry = cutbdry
@@ -433,9 +438,9 @@ class EdgeCut():
         # NOTE: halfedge should be on specified face
         if he.face.index != self.splitf:
             he = he.twin
-            assert he.face == self.splitf, f"Neither halfedge on edge is incident to the chosen splitf face."
+            assert he.face.index == self.splitf, f"Neither halfedge on edge is incident to the chosen splitf face."
 
-        sourcev = self.mesh.vertices[self.startv]
+        sourcev = self.mesh.topology.vertices[self.startv]
         targetv = he.tip_vertex() if sourcev != he.tip_vertex() else he.vertex
         otherhe = he.twin
 
@@ -492,18 +497,27 @@ class EdgeCut():
                 otherhe.twin = newh2
                 newh2.face = he_bounds[0].face
 
-                ## Check for targetv split condition
+                # Reassign vertex fans (on splitf side)
+                currenthe = newh1
+                while currenthe.twin.next != newh1:
+                    currenthe = currenthe.twin.next
+                    currenthe.vertex = newv
+                assert newh1.vertex == newv
+
+                ## Check for targetv split condition (if targetv is also on a boundary)
                 bd1 = he_bounds[0].face
-                targetbhe = [halfe for halfe in targetv.adjacentHalfedges() if halfe.onBoundary and halfe.face != bd1]
+
+                targetbhe = [halfe for halfe in targetv.adjacentHalfedges() if halfe.onBoundary and halfe != newh2 and halfe != newh1]
                 assert len(targetbhe) <= 1, f"Can't handle targetv with more than two boundaries! ({len(targetbhe)})"
                 if len(targetbhe) == 1 and self.cutbdry:
                     newtargetv = self.mesh.topology.vertices.allocate()
                     bdhe = targetbhe[0]
-                    oldboundary = targetbhe[0].face
+
                     self.mesh.vertices = np.concatenate([self.mesh.vertices, np.array([self.mesh.vertices[targetv.index]])], axis=0)
 
-                    ## Remove old boundary
-                    del self.mesh.topology.boundaries[oldboundary.index]
+                    ## Remove second boundary if different from original
+                    if bdhe.face != bd1:
+                        del self.mesh.topology.boundaries[bdhe.face.index]
 
                     ## Reassign boundary topology
                     bdhe_other = bdhe.prev()
@@ -522,15 +536,21 @@ class EdgeCut():
                         currenthe.vertex = newtargetv
                     assert he.vertex == newtargetv
 
+                    ## Loop through full boundary and reassign boundary index
+                    for he in bd1.adjacentHalfedges():
+                        if he.face != bd1:
+                            he.face = bd1
+
                     ## Test topology
                     self.mesh.topology.compactify_keys()
                     self.mesh.topology.thorough_check()
 
-                    assert len(bdhe.face.adjacentVertices()) == len(self.mesh.boundaries[newh1.face.index]), f"Boundaries lengths not the same after targetv split!"
+                    assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
 
             ## Subcase 2: vertex incident on he
             else:
                 newv.halfedge = he
+                he.vertex = newv
                 newh1.vertex = otherhe.vertex
                 newh1.next = he_bounds[0]
                 newh1.onBoundary = True
@@ -556,18 +576,28 @@ class EdgeCut():
                 otherhe.twin = newh2
                 newh2.face = he_bounds[0].face
 
+                # Reassign vertex fans (on splitf side)
+                currenthe = he
+                while currenthe.twin.next != he:
+                    currenthe = currenthe.twin.next
+                    currenthe.vertex = newv
+                assert he.vertex == newv
+
                 ## Check for targetv split condition
                 bd1 = he_bounds[0].face
-                targetbhe = [halfe for halfe in targetv.adjacentHalfedges() if halfe.onBoundary and halfe.face != bd1]
+                targetbhe = [halfe for halfe in targetv.adjacentHalfedges() if halfe.onBoundary and halfe != newh1 and halfe != newh2]
                 assert len(targetbhe) <= 1, f"Can't handle targetv with more than two boundaries! ({len(targetbhe)})"
+
+                # Targetv on same boundary as sourcev
                 if len(targetbhe) == 1 and self.cutbdry:
                     newtargetv = self.mesh.topology.vertices.allocate()
                     bdhe = targetbhe[0]
-                    oldboundary = targetbhe[0].face
+                    assert bdhe.face == bd1, f"Targetv must be on same boundary as sourcev boundary!"
                     self.mesh.vertices = np.concatenate([self.mesh.vertices, np.array([self.mesh.vertices[targetv.index]])], axis=0)
 
-                    ## Remove old boundary
-                    del self.mesh.topology.boundaries[oldboundary.index]
+                    ## Remove second boundary if different from original
+                    if bdhe.face != bd1:
+                        del self.mesh.topology.boundaries[bdhe.face.index]
 
                     ## Reassign boundary topology
                     bdhe_other = bdhe.prev()
@@ -587,11 +617,20 @@ class EdgeCut():
                         currenthe.vertex = newtargetv
                     assert bdhe_other.twin.vertex == newtargetv
 
+                    ## Loop through full boundary and reassign boundary index
+                    for he in bd1.adjacentHalfedges():
+                        if he.face != bd1:
+                            he.face = bd1
+
                     ## Test topology
                     self.mesh.topology.compactify_keys()
                     self.mesh.topology.thorough_check()
 
-                    assert len(bdhe.face.adjacentVertices()) == len(self.mesh.boundaries[newh1.face.index]), f"Boundaries lengths not the same after targetv split!"
+                    assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
+
+            # Update faces
+            vs, fs, es = self.mesh.export_soup()
+            self.mesh.faces = fs
 
         #### Case 2: cut two edges in the middle of mesh
         # Cut: 1 new vertex, 2 new edges, 4 new halfedges, 1 new boundary (all new he on it)
@@ -677,18 +716,27 @@ class EdgeCut():
                 newh2.vertex = sourcev
                 newh2.edge = otherhe.edge
 
-                ## Check for targetv split condition
+                # Reassign vertex fans (on splitf/splitf2 side)
+                currenthe = he2
+                stophe = newh1
+                while currenthe != stophe:
+                    currenthe = currenthe.twin.next
+                    currenthe.vertex = newv
+                assert stophe.vertex == newv
+
+                ## Check for targetv2 split condition
                 bd1 = newbd
-                targetbhe = [halfe for halfe in targetv.adjacentHalfedges() if halfe.onBoundary and halfe.face != bd1]
-                assert len(targetbhe) <= 1, f"Can't handle targetv with more than two boundaries! ({len(targetbhe)})"
+                targetbhe = [halfe for halfe in targetv2.adjacentHalfedges() if halfe.onBoundary and halfe != newh4 and halfe != newh3]
+                assert len(targetbhe) <= 1, f"Can't handle targetv2 with more than two boundaries! ({len(targetbhe)})"
+
                 if len(targetbhe) == 1 and self.cutbdry:
                     newtargetv = self.mesh.topology.vertices.allocate()
                     bdhe = targetbhe[0]
-                    oldboundary = targetbhe[0].face
                     self.mesh.vertices = np.concatenate([self.mesh.vertices, np.array([self.mesh.vertices[targetv.index]])], axis=0)
 
                     ## Remove old boundary
-                    del self.mesh.topology.boundaries[oldboundary.index]
+                    if bdhe.face != bd1:
+                        del self.mesh.topology.boundaries[bdhe.face.index]
 
                     ## Reassign boundary topology
                     bdhe_other = bdhe.prev()
@@ -712,7 +760,7 @@ class EdgeCut():
                     self.mesh.topology.compactify_keys()
                     self.mesh.topology.thorough_check()
 
-                    assert len(bdhe.face.adjacentVertices()) == len(self.mesh.boundaries[newh1.face.index]), f"Boundaries lengths not the same after targetv split!"
+                    assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
 
             ### Subcase 2: sourcev is tip of he
             else:
@@ -764,18 +812,27 @@ class EdgeCut():
                 newh3.vertex = targetv2
                 newh3.edge = otherhe2.edge
 
+                # Reassign vertex fans (on splitf/splitf2 side)
+                currenthe = he
+                stophe = newh4
+                while currenthe != stophe:
+                    currenthe = currenthe.twin.next
+                    currenthe.vertex = newv
+                assert stophe.vertex == newv
+
                 ## Check for targetv split condition
                 bd1 = he_bounds[0].face
-                targetbhe = [halfe for halfe in targetv.adjacentHalfedges() if halfe.onBoundary and halfe.face != bd1]
+                targetbhe = [halfe for halfe in targetv.adjacentHalfedges() if halfe.onBoundary and halfe != newh3 and halfe != newh4]
                 assert len(targetbhe) <= 1, f"Can't handle targetv with more than two boundaries! ({len(targetbhe)})"
+
                 if len(targetbhe) == 1 and self.cutbdry:
                     newtargetv = self.mesh.topology.vertices.allocate()
                     bdhe = targetbhe[0]
-                    oldboundary = targetbhe[0].face
                     self.mesh.vertices = np.concatenate([self.mesh.vertices, np.array([self.mesh.vertices[targetv.index]])], axis=0)
 
                     ## Remove old boundary
-                    del self.mesh.topology.boundaries[oldboundary.index]
+                    if bdhe.face != bd1:
+                        del self.mesh.topology.boundaries[bdhe.face.index]
 
                     ## Reassign boundary topology
                     bdhe_other = bdhe.prev()
@@ -798,7 +855,11 @@ class EdgeCut():
                     self.mesh.topology.compactify_keys()
                     self.mesh.topology.thorough_check()
 
-                    assert len(bdhe.face.adjacentVertices()) == len(self.mesh.boundaries[newh1.face.index]), f"Boundaries lengths not the same after targetv split!"
+                    assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
+
+            # Update faces
+            vs, fs, es = self.mesh.export_soup()
+            self.mesh.faces = fs
 
 class VertexSplit():
     def __init__(

@@ -24,10 +24,12 @@ class Mesh:
                 setattr(self, attr, meshdata[attr])
         else:
             self.vertices = vertices
-            self.faces = face_indices.astype(int)
             self.uvs = uvs
             # self.faces = fix_orientation(self.vertices, face_indices.astype(int))
-            self.topology.build(len(vertices), self.faces)
+            self.topology.build(len(vertices), face_indices)
+
+            vs, fs, es = self.export_soup()
+            self.faces = fs
 
     def export_soup(self, remove_isolated_vertices=False):
         init_n = len(self.vertices)
