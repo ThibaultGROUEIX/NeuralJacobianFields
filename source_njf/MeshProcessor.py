@@ -406,7 +406,8 @@ class WaveKernelSignature:
             except:
                 self.eig_vals, self.eig_vecs = scipy.sparse.linalg.eigsh(
                     L, self.top_k_eig, M, sigma=1e-4, which='LM', maxiter=self.max_iter)
-        except:
+        except Exception as e:
+            print(e)
             raise WaveKernelSignatureError("Error in computing WKS")
 
         # print(np.linalg.norm(self.eig_vecs, axis=0, keepdims=True))

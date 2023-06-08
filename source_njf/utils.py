@@ -475,7 +475,7 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
         ef1 = finalsoup[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
         edge_delta = np.sum(np.linalg.norm(ef1 - ef0, axis=-1), axis=1) # E x 1
         bdrycount = 0
-        for eidx, edge in mesh.topology.edges.items():
+        for eidx, edge in sorted(mesh.topology.edges.items()):
             if edge.onBoundary():
                 bdrycount += 1
                 continue

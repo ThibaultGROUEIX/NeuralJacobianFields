@@ -23,7 +23,7 @@ if __name__ == '__main__':
     # Wandb prune cache
     import wandb
     c = wandb.wandb_sdk.wandb_artifacts.get_artifacts_cache()
-    c.cleanup(int(1e9))
+    c.cleanup(int(1e11))
 
     #this parses the command line arguments and then trains on the given dataset with the given experiment
     args = args_from_cli.parse_args()

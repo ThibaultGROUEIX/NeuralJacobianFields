@@ -239,9 +239,9 @@ class MyNet(pl.LightningModule):
         # feed the 2D tensor through the network, and get a 3x3 matrix for each (z_i|c_j)
         res = self.forward(stacked)
 
-        # Flat mode
-        if self.args.dense:
-            ret = res.reshape(res.shape[0], source.mesh_processor.faces.shape[0], 3, 3)
+        # No global codes
+        if self.args.dense or codes is None:
+            ret = res.reshape(1, source.mesh_processor.faces.shape[0], 3, 3)
 
             if self.__IDENTITY_INIT:
                 for i in range(0, 3):
@@ -462,12 +462,12 @@ class MyNet(pl.LightningModule):
                         export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(ftoeloss):0.4f}",
                                     fcolor_vals=ftoeloss, device="cpu", n_sample=25, width=200, height=200,
-                                    vmin=0, vmax=0.3)
+                                    vmin=0, vmax=0.3, shading=False)
                     else:
                         export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(val):0.4f}",
                                     fcolor_vals=val, device="cpu", n_sample=25, width=200, height=200,
-                                    vmin=0, vmax=0.6)
+                                    vmin=0, vmax=0.6, shading=False)
 
             ## Poisson values
             # Check poisson UVs (true UV)
@@ -483,7 +483,7 @@ class MyNet(pl.LightningModule):
             export_views(mesh, save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
                         plotname=f"Poisson Distortion Loss: {np.sum(batch_parts['poissonDistortion']):0.4f}",
                         fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
-                        vmin=0, vmax=0.6)
+                        vmin=0, vmax=0.6, shading=False)
 
             if self.args.lossgradientstitching and self.args.opttrans:
                 # Convert edge cuts to vertex values (separate for each tri => in order of tris)
@@ -502,7 +502,10 @@ class MyNet(pl.LightningModule):
                 export_views(mesh, save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
                             plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
                             vcolor_vals= vcut_vals, device="cpu", n_sample=25, width=200, height=200,
-                            vmin=0, vmax=1, outline_width=0)
+                            vmin=0, vmax=1, outline_width=0.005, shading=False)
+
+                images = [os.path.join(save_path, f"stitch_mesh_{self.current_epoch:05}.png")]
+                self.logger.log_image(key='opttrans cut', images=images, step=self.current_epoch)
 
         return val_loss
 
@@ -1075,7 +1078,7 @@ def main(gen, args):
         else:
             print(f"Warning: No wandb record found in {os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')}!. Starting log from scratch...")
 
-    logger = WandbLogger(project=args.projectname, name=args.expname, save_dir=os.path.join(args.outputdir, args.expname), log_model='all' if not args.debug else False,
+    logger = WandbLogger(project=args.projectname, name=args.expname, save_dir=os.path.join(args.outputdir, args.expname), log_model=False,
                          offline=args.debug, resume='must' if args.continuetrain and id is not None else 'allow', id = id)
 
     # if args.gpu_strategy:
@@ -1276,19 +1279,21 @@ def main(gen, args):
                         save_all=True, duration=100, loop=0, disposal=2)
 
         # Stitching
-        # if args.lossgradientstitching:
-        #     # Base
-        #     fp_in = f"{save_path}/stitch_mesh_*.png"
-        #     fp_out = f"{save_path}/stitch_mesh.gif"
-        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
+        if args.lossgradientstitching and args.opttrans:
+            # Base
+            fp_in = f"{vispath}/frames/stitch_mesh_*.png"
+            fp_out = f"{vispath}/frames/stitch_mesh.gif"
+            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
-        #     # Resize images
-        #     basewidth = 1000
-        #     wpercent = basewidth/imgs[0].size[0]
-        #     newheight = int(wpercent * imgs[0].size[1])
-        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
-        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-        #             save_all=True, duration=100, loop=0, disposal=2)
+            # Resize images
+            basewidth = 1000
+            wpercent = basewidth/imgs[0].size[0]
+            newheight = int(wpercent * imgs[0].size[1])
+            imgs = [img.resize((basewidth, newheight)) for img in imgs]
+            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                    save_all=True, duration=100, loop=0, disposal=2)
+
+            model.logger.log_image(key=f"mesh cut gif", images=[fp_out])
 
         ## Poisson solve
         if args.no_poisson:

@@ -76,7 +76,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                 #     logger.experiment.log({f"{key}_{fname}": wandb.Image(os.path.join(path, f"{key}_{fname}.png"))})
 
 def export_views(mesh, savedir, n=5, n_sample=20, width=150, height=150, plotname="Views", filename="test", fcolor_vals=None,
-                 vcolor_vals=None,
+                 vcolor_vals=None, shading=True,
                  device="cpu", outline_width=0.005, cmap= plt.get_cmap("Reds"), vmin=0, vmax=1):
     import torch
     import matplotlib as mpl
@@ -90,8 +90,12 @@ def export_views(mesh, savedir, n=5, n_sample=20, width=150, height=150, plotnam
     mesh.material = fresnel.material.Material(color=fresnel.color.linear([0.25, 0.5, 0.9]), roughness=0.1)
 
     # NOTE: outline width 0 => outline off
-    mesh.outline_material = fresnel.material.Material(color=(0., 0., 0.), roughness=0.1, metal=1.)
+    mesh.outline_material = fresnel.material.Material(color=(0., 0., 0.), roughness=0.1, solid=1)
     mesh.outline_width=outline_width
+
+    # Shading
+    if not shading:
+        mesh.material.solid = 1.0
 
     norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
     scalarmap = cm.ScalarMappable(norm=norm, cmap=cmap)
