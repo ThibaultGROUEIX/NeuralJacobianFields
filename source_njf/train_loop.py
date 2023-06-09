@@ -488,8 +488,15 @@ class MyNet(pl.LightningModule):
             if self.args.lossgradientstitching and self.args.opttrans:
                 # Convert edge cuts to vertex values (separate for each tri => in order of tris)
                 cutedges = batch_parts['cutEdges'] # Indices of cut edges
+                cutvs = []
+                for eidx, e in sorted(mesh.topology.edges.items()):
+                    if eidx in cutedges:
+                        cutvs.append(e.halfedge.vertex.index)
+                        cutvs.append(e.halfedge.twin.vertex.index)
+                cutvs = list(set(cutvs))
+
                 vs, fs, es = mesh.export_soup()
-                cutvs = np.unique(es[cutedges]) # Indices of cut vs
+                # cutvs = np.unique(es[cutedges]) # Indices of cut vs
                 vcut_vals = []
                 for f in fs:
                     for v in f:
