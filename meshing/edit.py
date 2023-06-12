@@ -401,7 +401,7 @@ class EdgeCut():
             startv: where to start the cut (determines the direction of cut)
             splitf: index of face to assign the new primitives to (must be adjacent to the cut edge)
             e2_i: index of second edge to cut (must be specified if cutting middle of mesh)
-            splitf2: index of adjacent face on second cut edge to assign new primitives """
+            """
         self.mesh = mesh
         self.e_i = e_i
         self.cutbdry = cutbdry

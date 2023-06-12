@@ -18,10 +18,11 @@ class SourceMesh:
     datastructure for the source mesh to be mapped
     '''
 
-    def __init__(self, source_ind, source_dir, extra_source_fields,
+    def __init__(self, args, source_ind, source_dir, extra_source_fields,
                  random_scale, ttype, use_wks=False, random_centering=False,
                 cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False,
                 initjinput=False, debug=False, top_k_eig=50):
+        self.args = args
         self.__use_wks = use_wks
         self.source_ind = source_ind
         # NOTE: This is the CACHE DIRECTORY
@@ -130,7 +131,8 @@ class SourceMesh:
             if os.path.exists(os.path.join(self.source_dir, "tuttefuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "tutteuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "tuttej.pt")) and \
-                os.path.exists(os.path.join(self.source_dir, "tuttetranslate.pt")):
+                os.path.exists(os.path.join(self.source_dir, "tuttetranslate.pt")) and \
+                    not new_init:
                 self.tuttefuv = torch.load(os.path.join(self.source_dir, "tuttefuv.pt"))
                 self.tutteuv = torch.load(os.path.join(self.source_dir, "tutteuv.pt"))
                 self.tuttej = torch.load(os.path.join(self.source_dir, "tuttej.pt"))
@@ -143,15 +145,107 @@ class SourceMesh:
                 faces = self.get_source_triangles()
                 fverts = vertices[faces].transpose(1,2)
 
-                # TODO: GENERATE RANDOM CUTS IF SET
+                if new_init:
+                    from meshing.mesh import Mesh
+                    from meshing.edit import EdgeCut
+                    from meshing.io import PolygonSoup
 
-                self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), self.get_source_triangles(), fixclosed=True)).unsqueeze(0) # 1 x F x 2
+                    n_cuts = np.random.randint(self.args.min_cuts, self.args.max_cuts+1)
+                    mesh = Mesh(vertices.detach().cpu().numpy(), faces)
 
-                # Convert Tutte to 3-dim
-                self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
+                    prev_edge = None
+                    for i in range(n_cuts):
+                        if prev_edge is None:
+                            edgei = np.random.randint(0, len(mesh.topology.edges))
+                            edge = mesh.topology.edges[edgei]
+                            splitf = edge.halfedge.face.index
+                            # If sampled boundary edge, then keep resampling
+                            while edge.onBoundary():
+                                edgei = np.random.randint(0, len(mesh.topology.edges))
+                                edge = mesh.topology.edges[edgei]
+                                splitf = edge.halfedge.face.indexs
+                            # If vertex is starting on boundary, then this is simple cut case
+                            if edge.halfedge.vertex.onBoundary() or edge.halfedge.twin.vertex.onBoundary():
+                                sourcev = edge.halfedge.vertex.index if edge.halfedge.vertex.onBoundary() else edge.halfedge.twin.vertex.index
+                                EdgeCut(mesh, edgei, sourcev, splitf).apply()
+                            else:
+                                # Need to sample a second edge (not on boundary)
+                                e2_candidates = [e.index for e in edge.halfedge.vertex.adjacentEdges() if not e.onBoundary()] + \
+                                            [e.index for e in edge.halfedge.twin.vertex.adjacentEdges() if not e.onBoundary()]
+                                if len(e2_candidates) == 0:
+                                    raise ValueError("All candidate second edges are on boundary.")
+                                else:
+                                    e2_i = np.random.choice(e2_candidates)
 
-                # Get Jacobians
-                self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
+                                # Sourcev is shared vertex between the two edges
+                                sourcev = edge.halfedge.vertex
+                                if sourcev not in mesh.topology.edges[e2_i].two_vertices():
+                                    sourcev = edge.halfedge.twin.vertex
+                                assert sourcev in mesh.topology.edges[e2_i].two_vertices()
+
+                                sourcev = sourcev.index
+                                EdgeCut(mesh, edgei, sourcev, splitf, cutbdry=True, e2_i=e2_i).apply()
+                        else:
+                            # Sample edge adjacent to previous edge
+                            ecandidates = [e.index for e in prev_edge.halfedge.vertex.adjacentEdges() if not e.onBoundary()] + \
+                                            [e.index for e in prev_edge.halfedge.twin.vertex.adjacentEdges() if not e.onBoundary()]
+
+                            # Filter out all edges which have vertex on same boundary as previous edge
+                            prevboundary = prev_edge.halfedge.face if prev_edge.halfedge.onBoundary else prev_edge.halfedge.twin.face
+                            keepei = []
+                            for ei in ecandidates:
+                                edge = mesh.topology.edges[ei]
+                                vertex = edge.halfedge.vertex if edge.halfedge.vertex not in prev_edge.two_vertices() else edge.halfedge.twin.vertex
+
+                                # If vertex boundary is same as previous boundary, then we skip the incident edge
+                                if vertex.onBoundary():
+                                    for he in vertex.adjacentHalfedges():
+                                        if he.onBoundary:
+                                            break
+                                    if he.face != prevboundary:
+                                        keepei.append(ei)
+                                else:
+                                    keepi.append(ei)
+                            ecandidates = keepi
+
+                            if len(e2_candidates) == 0:
+                                raise ValueError("All candidate second edges are on boundary.")
+                            else:
+                                edgei = np.random.choice(e2_candidates)
+                                edge = mesh.topology.edges[edgei]
+                                sourcev = edge.halfedge.vertex if edge.halfedge.vertex in prev_edge.two_vertices() else edge.halfedge.twin.vertex
+                                sourcev = sourcev.index
+                                splitf = edge.halfedge.face.index
+                                EdgeCut(mesh, edgei, sourcev, splitf, cutbdry=True).apply()
+
+                        prev_edge = edge
+
+                    # Unit test: mesh is still connected
+                    testsoup = PolygonSoup(mesh.vertices, mesh.faces)
+                    n_components = testsoup.nConnectedComponents()
+                    assert n_components == 1, f"After cutting found {n_components} components!"
+
+                    # New UVs/Jacobians from vertices based on cut topology
+                    vs, fs, es = mesh.export_soup()
+                    self.tutteuv = torch.from_numpy(tutte_embedding(vs, fs)).unsqueeze(0) # 1 x F x 2
+
+                    # Convert Tutte to 3-dim
+                    self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
+
+                    # Get Jacobians
+                    meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(vs, fs, self.source_dir, self._SourceMesh__ttype, cpuonly=self.cpuonly, load_wks_samples=self._SourceMesh__use_wks, load_wks_centroids=self._SourceMesh__use_wks)
+                    meshprocessor.prepare_temporary_differential_operators(self._SourceMesh__ttype)
+                    poissonsolver = meshprocessor.diff_ops.poisson_solver
+
+                    self.tuttej = poissonsolver.jacobians_from_vertices(self.tutteuv) # F x 3 x 3
+                else:
+                    self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces)).unsqueeze(0) # 1 x F x 2
+
+                    # Convert Tutte to 3-dim
+                    self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
+
+                    # Get Jacobians
+                    self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
 
                 # DEBUG: make sure we can get back the original UVs up to global translation
                 pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
@@ -231,9 +325,6 @@ class SourceMesh:
 
                 else:
                     local_tris = get_local_tris(vertices, faces) # F x 3 x 2
-
-                # TODO: TRY PROJECTING TO PRINCIPAL CURVATURE BASIS INSTEAD
-                # TODO: random init -> 6 dfft local bases for each triangle, just sample from them (ab => [1,0], ba => [-1,0], ...)
 
                 # Randomly sample displacements
                 # NOTE: might need to alter the scales here

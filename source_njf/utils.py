@@ -57,24 +57,24 @@ def get_jacobian(uvtri, local_tris):
     return J
 
 # Get Tutte embedding from IGL
-def tutte_embedding(vertices, faces, fixclosed=False):
+def tutte_embedding(vertices, faces):
     import igl
     bnd = igl.boundary_loop(faces)
 
     ## If mesh is closed then we cut a seam if set
-    if fixclosed and (bnd is None or len(bnd) == 0):
-        from meshing.mesh import Mesh
-        from meshing.edit import EdgeCut
+    # if fixclosed and (bnd is None or len(bnd) == 0):
+    #     from meshing.mesh import Mesh
+    #     from meshing.edit import EdgeCut
 
-        # TODO: cut out a triangle
-        mesh = Mesh(vertices, faces)
-        # for he in mesh.topology.faces[0].adjacentHalfedges():
-        #     EdgeCut(mesh, he.index).apply()
+    #     # TODO: cut out a triangle
+    #     mesh = Mesh(vertices, faces)
+    #     # for he in mesh.topology.faces[0].adjacentHalfedges():
+    #     #     EdgeCut(mesh, he.index).apply()
 
-        he2 = mesh.topology.halfedges[0].next.index
-        EdgeCut(mesh, 0).apply()
-        EdgeCut(mesh, he2).apply()
-        bnd = igl.boundary_loop(faces)
+    #     he2 = mesh.topology.halfedges[0].next.index
+    #     EdgeCut(mesh, 0).apply()
+    #     EdgeCut(mesh, he2).apply()
+    #     bnd = igl.boundary_loop(faces)
 
     if bnd is None:
         raise ValueError(f"tutte_embedding: mesh has no boundary! set fixclosed = True to try to cut to disk topology.")
