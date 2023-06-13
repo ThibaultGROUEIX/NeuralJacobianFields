@@ -141,7 +141,6 @@ class SourceMesh:
                 from utils import tutte_embedding, get_local_tris
 
                 vertices = self.source_vertices
-                device = vertices.device
                 faces = self.get_source_triangles()
                 fverts = vertices[faces].transpose(1,2)
 
@@ -154,6 +153,8 @@ class SourceMesh:
                     mesh = Mesh(vertices.detach().cpu().numpy(), faces)
 
                     prev_edge = None
+                    prev_source = None
+                    cutvs = []
                     for i in range(n_cuts):
                         if prev_edge is None:
                             edgei = np.random.randint(0, len(mesh.topology.edges))
@@ -163,36 +164,82 @@ class SourceMesh:
                             while edge.onBoundary():
                                 edgei = np.random.randint(0, len(mesh.topology.edges))
                                 edge = mesh.topology.edges[edgei]
-                                splitf = edge.halfedge.face.indexs
+                                splitf = edge.halfedge.face.index
                             # If vertex is starting on boundary, then this is simple cut case
                             if edge.halfedge.vertex.onBoundary() or edge.halfedge.twin.vertex.onBoundary():
                                 sourcev = edge.halfedge.vertex.index if edge.halfedge.vertex.onBoundary() else edge.halfedge.twin.vertex.index
+                                targetv = edge.halfedge.vertex.index if edge.halfedge.twin.vertex.onBoundary() else edge.halfedge.twin.vertex.index
+
+                                cut_vs = [mesh.vertices[sourcev], mesh.vertices[targetv]]
+                                cutvs.extend(cut_vs)
+
+                                # Visualize the cuts
+                                # ps.remove_all_structures()
+                                # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
+                                # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
+                                # currentcut = np.array(cutvs)
+                                # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
+                                # ps.show()
+
                                 EdgeCut(mesh, edgei, sourcev, splitf).apply()
                             else:
                                 # Need to sample a second edge (not on boundary)
-                                e2_candidates = [e.index for e in edge.halfedge.vertex.adjacentEdges() if not e.onBoundary()] + \
-                                            [e.index for e in edge.halfedge.twin.vertex.adjacentEdges() if not e.onBoundary()]
+                                e2_candidates = [e.index for e in edge.halfedge.vertex.adjacentEdges() if not e.onBoundary() and e != edge] + \
+                                            [e.index for e in edge.halfedge.twin.vertex.adjacentEdges() if not e.onBoundary() and e != edge]
                                 if len(e2_candidates) == 0:
-                                    raise ValueError("All candidate second edges are on boundary.")
+                                    break
+                                    # raise ValueError("All candidate second edges are on boundary.")
                                 else:
                                     e2_i = np.random.choice(e2_candidates)
 
                                 # Sourcev is shared vertex between the two edges
+                                presourcev = edge.halfedge.twin.vertex
                                 sourcev = edge.halfedge.vertex
+                                otheredge = mesh.topology.edges[e2_i]
+                                targetv = otheredge.halfedge.vertex
                                 if sourcev not in mesh.topology.edges[e2_i].two_vertices():
                                     sourcev = edge.halfedge.twin.vertex
+                                    presourcev = edge.halfedge.vertex
+                                if targetv in edge.two_vertices():
+                                    targetv = otheredge.halfedge.twin.vertex
                                 assert sourcev in mesh.topology.edges[e2_i].two_vertices()
-
+                                assert presourcev not in mesh.topology.edges[e2_i].two_vertices()
+                                assert targetv not in edge.two_vertices()
                                 sourcev = sourcev.index
+                                targetv = targetv.index
+                                presourcev = presourcev.index
+
+                                cut_vs = [mesh.vertices[presourcev], mesh.vertices[sourcev], mesh.vertices[targetv]]
+                                cutvs.extend(cut_vs)
+
+                                # Visualize the cuts
+                                # ps.remove_all_structures()
+                                # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
+                                # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
+                                # currentcut = np.array(cutvs)
+                                # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
+                                # ps.show()
+
+                                # Actual edge should be second edge
+                                edge = mesh.topology.edges[e2_i]
+
                                 EdgeCut(mesh, edgei, sourcev, splitf, cutbdry=True, e2_i=e2_i).apply()
                         else:
                             # Sample edge adjacent to previous edge
-                            ecandidates = [e.index for e in prev_edge.halfedge.vertex.adjacentEdges() if not e.onBoundary()] + \
-                                            [e.index for e in prev_edge.halfedge.twin.vertex.adjacentEdges() if not e.onBoundary()]
+                            prev_target = prev_edge.halfedge.vertex if prev_edge.halfedge.vertex.index != prev_source else prev_edge.halfedge.twin.vertex
+
+                            # Visualize target
+                            # ps_target = ps.register_curve_network("targetv", mesh.vertices[[prev_target.index]], np.array([[0,0]]), enabled=True)
+                            # ps_prev_source = ps.register_curve_network("prevsource", mesh.vertices[[prev_source]], np.array([[0,0]]), enabled=True)
+                            # ps.show()
+
+                            ecandidates = [e.index for e in prev_target.adjacentEdges() if not e.onBoundary()] + \
+                                            [e.index for e in prev_target.adjacentEdges() if not e.onBoundary()]
 
                             # Filter out all edges which have vertex on same boundary as previous edge
+                            assert prev_edge.onBoundary()
                             prevboundary = prev_edge.halfedge.face if prev_edge.halfedge.onBoundary else prev_edge.halfedge.twin.face
-                            keepei = []
+                            keepi = []
                             for ei in ecandidates:
                                 edge = mesh.topology.edges[ei]
                                 vertex = edge.halfedge.vertex if edge.halfedge.vertex not in prev_edge.two_vertices() else edge.halfedge.twin.vertex
@@ -203,22 +250,39 @@ class SourceMesh:
                                         if he.onBoundary:
                                             break
                                     if he.face != prevboundary:
-                                        keepei.append(ei)
+                                        keepi.append(ei)
                                 else:
                                     keepi.append(ei)
                             ecandidates = keepi
 
-                            if len(e2_candidates) == 0:
-                                raise ValueError("All candidate second edges are on boundary.")
+                            if len(ecandidates) == 0:
+                                break
+                                # raise ValueError("All candidate second edges would cause mesh to be disconnected.")
                             else:
-                                edgei = np.random.choice(e2_candidates)
+                                edgei = np.random.choice(ecandidates)
                                 edge = mesh.topology.edges[edgei]
                                 sourcev = edge.halfedge.vertex if edge.halfedge.vertex in prev_edge.two_vertices() else edge.halfedge.twin.vertex
+                                assert sourcev == prev_target
+
                                 sourcev = sourcev.index
                                 splitf = edge.halfedge.face.index
+
+                                targetv = edge.halfedge.twin.vertex.index if sourcev == edge.halfedge.vertex.index else edge.halfedge.vertex.index
+                                cut_vs = [mesh.vertices[targetv]]
+                                cutvs.extend(cut_vs)
+
+                                # Visualize the cuts
+                                # ps.remove_all_structures()
+                                # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
+                                # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
+                                # currentcut = np.array(cutvs)
+                                # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
+                                # ps.show()
+
                                 EdgeCut(mesh, edgei, sourcev, splitf, cutbdry=True).apply()
 
                         prev_edge = edge
+                        prev_source = sourcev
 
                     # Unit test: mesh is still connected
                     testsoup = PolygonSoup(mesh.vertices, mesh.faces)

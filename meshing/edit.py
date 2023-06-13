@@ -553,6 +553,7 @@ class EdgeCut():
             else:
                 newv.halfedge = he
                 he.vertex = newv
+                otherhe.vertex.halfedge = newh1
                 newh1.vertex = otherhe.vertex
                 newh1.next = he_bounds[0]
                 newh1.onBoundary = True
@@ -598,7 +599,6 @@ class EdgeCut():
                 if len(targetbhe) == 1 and self.cutbdry:
                     newtargetv = self.mesh.topology.vertices.allocate()
                     bdhe = targetbhe[0]
-                    assert bdhe.face == bd1, f"Targetv must be on same boundary as sourcev boundary!"
                     self.mesh.vertices = np.concatenate([self.mesh.vertices, np.array([self.mesh.vertices[targetv.index]])], axis=0)
 
                     ## Remove second boundary if different from original
@@ -705,6 +705,7 @@ class EdgeCut():
                 he.vertex = newv
                 he.edge = newe1
                 newh1.vertex = he.tip_vertex()
+                he.tip_vertex().halfedge = newh1
                 newh1.edge = newe1
                 newe1.halfedge = he
 
@@ -717,9 +718,12 @@ class EdgeCut():
                 targetv2.halfedge = newh3
                 newh3.vertex = targetv2
                 newh3.edge = otherhe2.edge
+                otherhe2.edge.halfedge = newh3
 
                 newh4.vertex = sourcev
+                sourcev.halfedge = newh4
                 newh4.edge = otherhe.edge
+                otherhe.edge.halfedge = newh4
 
                 # Reassign vertex fans (on splitf/splitf2 side)
                 currenthe = newh2
@@ -757,6 +761,10 @@ class EdgeCut():
                     bdhe_other.next = newh3
                     newtargetv.halfedge = bdhe
                     bdhe.vertex = newtargetv
+
+                    ## Reassign boundary
+                    for halfe in bd1.adjacentHalfedges():
+                        halfe.face = bd1
 
                     ## Reassign vertex fans
                     currenthe = bdhe
@@ -818,6 +826,7 @@ class EdgeCut():
                 newh2.edge = newe2
                 newh2.vertex = targetv2
                 newe2.halfedge = he2
+                targetv2.halfedge = newh2
 
                 newv.halfedge = he2
                 he.edge = newe1
@@ -828,10 +837,14 @@ class EdgeCut():
 
                 ## Otherhe side (newh2, newh3 all on this side)
                 newh4.vertex = otherhe.tip_vertex()
+                otherhe.tip_vertex().halfedge = newh4
                 newh4.edge = otherhe.edge
+                otherhe.edge.halfedge = newh4
 
                 newh3.vertex = sourcev
+                sourcev.halfedge = newh3
                 newh3.edge = otherhe2.edge
+                otherhe2.edge.halfedge = newh3
 
                 # Reassign vertex fans (on splitf/splitf2 side)
                 currenthe = newh1
@@ -864,6 +877,10 @@ class EdgeCut():
                     newh3.next = bdhe
                     newh2.vertex = newtargetv
                     newtargetv.halfedge = newh2
+
+                    ## Reassign boundary
+                    for halfe in newbd.adjacentHalfedges():
+                        halfe.face = newbd
 
                     # In case targetv2 is assigned to split side
                     targetv2.halfedge = bdhe
