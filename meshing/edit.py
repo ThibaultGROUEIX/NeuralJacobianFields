@@ -523,6 +523,8 @@ class EdgeCut():
 
                     ## Reassign boundary topology
                     bdhe_other = bdhe.prev()
+
+                    targetv.halfedge = bdhe_other.twin
                     bdhe.face = newh1.face
                     newh1.next = bdhe
                     bdhe.vertex = newtargetv
@@ -609,6 +611,7 @@ class EdgeCut():
                     bdhe_other = bdhe.prev()
                     bdhe.face = newh2.face
                     newh2.next = bdhe
+                    targetv.halfedge = bdhe
                     assert bdhe.vertex == targetv, f"Targetv boundary halfedge should be assigned to targetv!"
 
                     bdhe_other.face = newh1.face
@@ -753,6 +756,8 @@ class EdgeCut():
 
                     ## Reassign boundary topology
                     bdhe_other = bdhe.prev()
+
+                    targetv2.halfedge = bdhe_other.twin
                     bdhe.face = newh2.face
                     newh2.next = bdhe
                     assert bdhe.vertex == targetv2, f"Second boundary he vertex should be targetv!"
@@ -762,16 +767,16 @@ class EdgeCut():
                     newtargetv.halfedge = bdhe
                     bdhe.vertex = newtargetv
 
-                    ## Reassign boundary
-                    for halfe in bd1.adjacentHalfedges():
-                        halfe.face = bd1
-
                     ## Reassign vertex fans
                     currenthe = bdhe
                     while currenthe != he2:
                         currenthe = currenthe.twin.next
                         currenthe.vertex = newtargetv
                     assert he2.vertex == newtargetv
+
+                    ## Reassign boundary
+                    for halfe in bd1.adjacentHalfedges():
+                        halfe.face = bd1
 
                     ## Test topology
                     self.mesh.topology.compactify_keys()
@@ -878,10 +883,6 @@ class EdgeCut():
                     newh2.vertex = newtargetv
                     newtargetv.halfedge = newh2
 
-                    ## Reassign boundary
-                    for halfe in newbd.adjacentHalfedges():
-                        halfe.face = newbd
-
                     # In case targetv2 is assigned to split side
                     targetv2.halfedge = bdhe
 
@@ -894,6 +895,10 @@ class EdgeCut():
                         currenthe = currenthe.twin.next
                         currenthe.vertex = newtargetv
                     assert newh2.vertex == newtargetv
+
+                    ## Reassign boundary
+                    for halfe in newbd.adjacentHalfedges():
+                        halfe.face = newbd
 
                     ## Test topology
                     self.mesh.topology.compactify_keys()

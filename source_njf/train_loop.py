@@ -432,6 +432,16 @@ class MyNet(pl.LightningModule):
 
         val_loss = batch_parts['loss'].item()
         if self.args.xp_type == "uv":
+            # If recutting Tutte: then plot the original tutte uvs
+            if self.args.init == "tutte" and self.args.ninit == -1:
+                source = batch[0]
+                initj = source.tuttej.squeeze().to(self.device)
+                initfuv = source.tuttefuv.squeeze().to(self.device)
+                tutteuv = initfuv.reshape(-1, 2)
+                tuttefaces = np.arange(len(tutteuv)).reshape(-1, 3)
+                plot_uv(save_path, f"tutte init epoch {self.current_epoch:05}", tutteuv.squeeze().detach().cpu().numpy(),
+                            tuttefaces, losses=None)
+
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
                     plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(),

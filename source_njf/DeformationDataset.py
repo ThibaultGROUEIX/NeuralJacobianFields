@@ -52,7 +52,7 @@ class DeformationDataset(Dataset):
                 source_target[s] = []
             source_target[s].append(t)
         # print(f"ellapsed {time.time() -st}")
-        if len(source_target) == 1 and not (args.init == "isometric" and args.ninit != 0):
+        if len(source_target) == 1 and args.ninit == 1:
             # This flag will avoid reloading the source at each iteration, since the source is always the same.
             self.unique_source = True
         self.source_and_target = []
@@ -184,7 +184,13 @@ class DeformationDataset(Dataset):
                                 random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
                                 initjinput = self.args.initjinput, fft=self.args.fft, fft_dim=self.args.fft_dim,
                                 flatten=self.args.dense, debug=self.args.debug, top_k_eig=self.args.top_k_eig)
-            source.load(new_init= self.args.basistype if self.args.ninit == -1 else None)
+            new_init = None
+            if self.args.ninit == -1:
+                if not self.args.basistype:
+                    new_init = True
+                else:
+                    new_init = self.args.basistype
+            source.load(new_init= new_init)
             self.source = source
 
         # ==================================================================

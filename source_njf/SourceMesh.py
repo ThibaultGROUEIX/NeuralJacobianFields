@@ -2,6 +2,7 @@ import os
 
 import numpy
 import numpy as np
+from numpy.random import default_rng
 import torch
 import igl
 import MeshProcessor
@@ -149,7 +150,8 @@ class SourceMesh:
                     from meshing.edit import EdgeCut
                     from meshing.io import PolygonSoup
 
-                    n_cuts = np.random.randint(self.args.min_cuts, self.args.max_cuts+1)
+                    rng = default_rng()
+                    n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
                     mesh = Mesh(vertices.detach().cpu().numpy(), faces)
 
                     prev_edge = None
@@ -291,17 +293,23 @@ class SourceMesh:
 
                     # New UVs/Jacobians from vertices based on cut topology
                     vs, fs, es = mesh.export_soup()
-                    self.tutteuv = torch.from_numpy(tutte_embedding(vs, fs)).unsqueeze(0) # 1 x F x 2
 
-                    # Convert Tutte to 3-dim
-                    self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
+                    # Only replace Tutte if no nan
+                    newtutte = torch.from_numpy(tutte_embedding(vs, fs)).unsqueeze(0) # 1 x F x 2
+                    set_new_tutte = False
+                    if torch.all(~torch.isnan(newtutte)):
+                        self.tutteuv = newtutte
 
-                    # Get Jacobians
-                    meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(vs, fs, self.source_dir, self._SourceMesh__ttype, cpuonly=self.cpuonly, load_wks_samples=self._SourceMesh__use_wks, load_wks_centroids=self._SourceMesh__use_wks)
-                    meshprocessor.prepare_temporary_differential_operators(self._SourceMesh__ttype)
-                    poissonsolver = meshprocessor.diff_ops.poisson_solver
+                        # Convert Tutte to 3-dim
+                        self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
 
-                    self.tuttej = poissonsolver.jacobians_from_vertices(self.tutteuv) # F x 3 x 3
+                        # Get Jacobians
+                        meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(vs, fs, self.source_dir, self._SourceMesh__ttype, cpuonly=self.cpuonly, load_wks_samples=self._SourceMesh__use_wks, load_wks_centroids=self._SourceMesh__use_wks)
+                        meshprocessor.prepare_temporary_differential_operators(self._SourceMesh__ttype)
+                        poissonsolver = meshprocessor.diff_ops.poisson_solver
+
+                        self.tuttej = poissonsolver.jacobians_from_vertices(self.tutteuv) # F x 3 x 3
+                        set_new_tutte = True
                 else:
                     self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces)).unsqueeze(0) # 1 x F x 2
 
@@ -312,8 +320,20 @@ class SourceMesh:
                     self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
 
                 # DEBUG: make sure we can get back the original UVs up to global translation
+                # NOTE: We compare triangle centroids bc face indexing gets messed up after cutting
+                ogmesh = Mesh(vertices.detach().cpu().numpy(), faces)
+                ogvs, ogfs, oges = ogmesh.export_soup()
+                fverts = torch.from_numpy(ogvs[ogfs]).transpose(1,2)
                 pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
-                checktutte = self.tutteuv[0,faces,:2]
+                if new_init and self.init == "tutte" and set_new_tutte:
+                    checktutte = self.tutteuv[0,fs,:2]
+                else:
+                    checktutte = self.tutteuv[0,faces,:2]
+
+                # Compute centroids
+                # pred_V = torch.mean(pred_V, dim=1, keepdim=True)
+                # checktutte = torch.mean(checktutte, dim=1, keepdim=True)
+
                 diff = pred_V - checktutte
                 diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
                 torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
