@@ -310,6 +310,15 @@ class SourceMesh:
 
                         self.tuttej = poissonsolver.jacobians_from_vertices(self.tutteuv) # F x 3 x 3
                         set_new_tutte = True
+                    # Otherwise, just use the default Tutte
+                    else:
+                        self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces)).unsqueeze(0) # 1 x F x 2
+
+                        # Convert Tutte to 3-dim
+                        self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
+
+                        # Get Jacobians
+                        self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
                 else:
                     self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces)).unsqueeze(0) # 1 x F x 2
 
