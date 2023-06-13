@@ -426,9 +426,9 @@ class MyNet(pl.LightningModule):
 
         np.save(os.path.join(source_path, f"latest_predt.npy"), batch_parts['T'])
 
-        if self.args.no_poisson:
-            np.save(os.path.join(source_path, f"latest_poissonuv.npy"), batch_parts['poissonUV'].squeeze().detach().cpu().numpy())
-            np.save(os.path.join(source_path, f"latest_poissont.npy"), batch_parts['ogT']) # NOTE: poisson T uses original triangles!
+        # if self.args.no_poisson:
+        #     np.save(os.path.join(source_path, f"latest_poissonuv.npy"), batch_parts['poissonUV'].squeeze().detach().cpu().numpy())
+        #     np.save(os.path.join(source_path, f"latest_poissont.npy"), batch_parts['ogT']) # NOTE: poisson T uses original triangles!
 
         val_loss = batch_parts['loss'].item()
         if self.args.xp_type == "uv":
@@ -490,10 +490,10 @@ class MyNet(pl.LightningModule):
                 self.logger.log_image(key='poisson uvs', images=images, step=self.current_epoch)
 
 
-            export_views(mesh, save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
-                        plotname=f"Poisson Distortion Loss: {np.sum(batch_parts['poissonDistortion']):0.4f}",
-                        fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
-                        vmin=0, vmax=0.6, shading=False)
+                export_views(mesh, save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
+                            plotname=f"Poisson Distortion Loss: {np.sum(batch_parts['poissonDistortion']):0.4f}",
+                            fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
+                            vmin=0, vmax=0.6, shading=False)
 
             if self.args.lossgradientstitching and self.args.opttrans:
                 # Convert edge cuts to vertex values (separate for each tri => in order of tris)
@@ -713,18 +713,19 @@ class MyNet(pl.LightningModule):
                 ret['pred_V'] = pred_V.detach().reshape(-1, 2)
             ret['T'] = np.arange(len(faces)*3).reshape(len(faces), 3)
 
-            with torch.no_grad():
-                pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
+            # NOTE: Poisson solve on updated topology
+            # with torch.no_grad():
+            #     pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
 
-            # Predicted UV should also be same up to global translation
-            # predfvert = ret['pred_V'][ret['T']]
-            # poisfvert = pred_V[0][ret['ogT']]
-            # diff = predfvert - poisfvert[:,:,:2]
+            # # Predicted UV should also be same up to global translation
+            # # predfvert = ret['pred_V'][ret['T']]
+            # # poisfvert = pred_V[0][ret['ogT']]
+            # # diff = predfvert - poisfvert[:,:,:2]
 
-            ret['poissonUV'] = pred_V
-            # NOTE: Initj already FACTORED into the predict map!!
-            poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
-            ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
+            # ret['poissonUV'] = pred_V
+            # # NOTE: Initj already FACTORED into the predict map!!
+            # poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
+            # ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
 
         if self.args.test:
             ret['pred_J_R'] = poisson_J_restricted.detach()
@@ -1168,7 +1169,7 @@ def main(gen, args):
         model = MyNet(gen, gen.get_code_length(train_dataset), point_dim=train_dataset.get_point_dim(), args=args)
 
     # NOTE: Network not initializing with correct device!!!
-    if has_gpu:
+    if has_gpu == "gpu":
         model.to(torch.device("cuda:0"))
         model.lossfcn.device = torch.device("cuda:0")
     else:
@@ -1227,9 +1228,9 @@ def main(gen, args):
         np.save(os.path.join(sourcepath, f"latest_preduv.npy"), ret['pred_V'].squeeze().detach().cpu().numpy())
         np.save(os.path.join(sourcepath, f"latest_predt.npy"), ret['T'])
 
-        if args.no_poisson:
-            np.save(os.path.join(sourcepath, f"latest_poissonuv.npy"), ret['poissonUV'].squeeze().detach().cpu().numpy())
-            np.save(os.path.join(sourcepath, f"latest_poissont.npy"), ret['ogT']) # NOTE: poisson T uses original triangles!
+        # if args.no_poisson:
+        #     np.save(os.path.join(sourcepath, f"latest_poissonuv.npy"), ret['poissonUV'].squeeze().detach().cpu().numpy())
+        #     np.save(os.path.join(sourcepath, f"latest_poissont.npy"), ret['ogT']) # NOTE: poisson T uses original triangles!
 
     ### GENERATE GIFS
     pref = ""
@@ -1313,43 +1314,43 @@ def main(gen, args):
             model.logger.log_image(key=f"mesh cut gif", images=[fp_out])
 
         ## Poisson solve
-        if args.no_poisson:
-            # Base
-            fp_in = f"{vispath}/frames/poisson_epoch_*.png"
-            fp_out = f"{vispath}/train_poisson.gif"
-            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
+        # if args.no_poisson:
+        #     # Base
+        #     fp_in = f"{vispath}/frames/poisson_epoch_*.png"
+        #     fp_out = f"{vispath}/train_poisson.gif"
+        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
 
-            # Resize images
-            basewidth = 400
-            wpercent = basewidth/imgs[0].size[0]
-            newheight = int(wpercent * imgs[0].size[1])
-            imgs = [img.resize((basewidth, newheight)) for img in imgs]
-            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-                    save_all=True, duration=100, loop=0, disposal=2)
+        #     # Resize images
+        #     basewidth = 400
+        #     wpercent = basewidth/imgs[0].size[0]
+        #     newheight = int(wpercent * imgs[0].size[1])
+        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
+        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+        #             save_all=True, duration=100, loop=0, disposal=2)
 
-            # Embedding distortion
-            fp_in = f"{vispath}/frames/distortionloss_poisson_epoch_*.png"
-            fp_out = f"{vispath}/train_poisson_distortionloss.gif"
-            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+        #     # Embedding distortion
+        #     fp_in = f"{vispath}/frames/distortionloss_poisson_epoch_*.png"
+        #     fp_out = f"{vispath}/train_poisson_distortionloss.gif"
+        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
-            # Resize images
-            basewidth = 400
-            wpercent = basewidth/imgs[0].size[0]
-            newheight = int(wpercent * imgs[0].size[1])
-            imgs = [img.resize((basewidth, newheight)) for img in imgs]
-            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-                    save_all=True, duration=100, loop=0, disposal=2)
+        #     # Resize images
+        #     basewidth = 400
+        #     wpercent = basewidth/imgs[0].size[0]
+        #     newheight = int(wpercent * imgs[0].size[1])
+        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
+        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+        #             save_all=True, duration=100, loop=0, disposal=2)
 
-            # Mesh distortion
-            fp_in = f"{vispath}/frames/poisson_mesh_*.png"
-            fp_out = f"{vispath}/train_poisson_mesh.gif"
-            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+        #     # Mesh distortion
+        #     fp_in = f"{vispath}/frames/poisson_mesh_*.png"
+        #     fp_out = f"{vispath}/train_poisson_mesh.gif"
+        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
-            # Resize images
-            basewidth = 1000
-            wpercent = basewidth/imgs[0].size[0]
-            newheight = int(wpercent * imgs[0].size[1])
-            imgs = [img.resize((basewidth, newheight)) for img in imgs]
-            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-                    save_all=True, duration=100, loop=0, disposal=2)
+        #     # Resize images
+        #     basewidth = 1000
+        #     wpercent = basewidth/imgs[0].size[0]
+        #     newheight = int(wpercent * imgs[0].size[1])
+        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
+        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+        #             save_all=True, duration=100, loop=0, disposal=2)
     # ================ #
