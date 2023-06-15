@@ -104,12 +104,6 @@ class UVLoss:
             if not self.args.losscount:
                 loss += torch.mean(distortionenergy)
 
-        if self.args.losscount and distortionenergy is not None:
-            countloss = count_loss_v2(distortionenergy, fareas, return_softloss=False, device=self.device,
-                                threshold = 1e-8)
-            self.currentloss[self.count]['countloss'] = countloss.item()
-            loss += countloss
-
         if self.args.lossedgeseparation:
             edgeseploss = torch.sum(uvseparation(vertices, faces, uv, loss= self.args.eseploss), dim=[1,2])
             # Relaxation
@@ -119,8 +113,8 @@ class UVLoss:
             self.currentloss[self.count]['edgeseploss'] = edgeseploss.detach().cpu().numpy()
 
         if self.args.lossgradientstitching:
-            if self.args.lossgradientstitching == "l2":
-                edgegradloss = torch.sum(uvgradloss(vertices, faces, uv), dim=1)
+            if self.args.lossgradientstitching == "cosine":
+                edgegradloss = uvgradloss(faces, uv)
             elif self.args.lossgradientstitching == "split":
                 edgegradloss = splitgradloss(vertices, faces, uv, cosine_weight=1, mag_weight=1)
 
@@ -265,37 +259,70 @@ def uvseparation(vs, fs, uv, loss='l1'):
 
     return separation
 
-def uvgradloss(vs, fs, uv, loss='l2'):
+def uvgradloss(fs, uv, return_edge_correspondence=False):
     """ uv: F x 3 x 2
         vs: V x 3 (original topology)
         fs: F x 3 (original topology) """
 
-    from meshing import Mesh
+    from source_njf.utils import edge_soup_correspondences
     # NOTE: Mesh data structure doesn't respect original face ordering
     # so we have to use custom edge-face connectivity export function
-    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
-    fconn, vconn = mesh.topology.export_edge_face_connectivity(mesh.faces)
-    fconn = np.array(fconn, dtype=int) # E x {f0, f1}
-    vconn = np.array(vconn, dtype=int) # E x {v0,v1}
-    ef0 = uv[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
-    ef1 = uv[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
+    # mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
+    # fconn, vconn = mesh.topology.export_edge_face_connectivity(mesh.faces)
+    # fconn = np.array(fconn, dtype=int) # E x {f0, f1}
+    # vconn = np.array(vconn, dtype=int) # E x {v0,v0'} x {v1, v1'}
+
+    uvsoup = uv.reshape(-1, 2)
+    edgecorrespondences = edge_soup_correspondences(fs.detach().cpu().numpy())
+    e1 = []
+    e2 = []
+    for k, v in edgecorrespondences.items():
+        # If only one correspondence, then it is a boundary
+        if len(v) == 1:
+            continue
+        e1.append(uvsoup[list(v[0])])
+        e2.append(uvsoup[list(v[1])])
+
+    ef0 = torch.cat(e1) # E*2 x 2
+    ef1 = torch.cat(e2) # E*2 x 2
+
+    # Debugging: visualize the edge vectors
+    # import polyscope as ps
+    # ps.init()
+    # ps_uv = ps.register_surface_mesh("uv", uvsoup, np.arange(len(uvsoup)).reshape(-1, 3), edge_width=1)
+
+    # # Map vconn to flattened triangle indices
+    # # NOTE: FCONN AND VCONN NO GOOD REDO
+    # vertcurve = np.arange(len(ef0)).reshape(-1, 2)
+    # ecolors = np.arange(len(vertcurve))
+
+    # ps_curve = ps.register_curve_network("edgeside1", ef0, vertcurve, enabled=True)
+    # ps_curve.add_scalar_quantity("ecolors", ecolors, defined_on='edges', enabled=True)
+    # ps_curve = ps.register_curve_network("edgeside2", ef1, vertcurve, enabled=True)
+    # ps_curve.add_scalar_quantity("ecolors", ecolors, defined_on='edges', enabled=True)
+    # ps.show()
 
     # Compare the edge vectors (just need to make sure the edge origin vertices are consistent)
-    e0 = ef0[:,1] - ef0[:,0] # E x 2
-    e1 = ef1[:,1] - ef1[:,0] # E x 2
+    e0 = ef0[::2] - ef0[1::2] # E x 2
+    e1 = ef1[::2] - ef1[1::2] # E x 2
+
+    # Cosine similarity
+    separation = 1 - torch.nn.functional.cosine_similarity(e0, e1, eps=1e-8)
 
     # Weight each loss by length of 3D edge
-    elens = []
-    for i, edge in sorted(mesh.topology.edges.items()):
-        if edge.onBoundary():
-            continue
-        elens.append(mesh.length(edge))
-    elens = torch.tensor(elens, device=uv.device).reshape(len(elens), 1)
+    # elens = []
+    # for i, edge in sorted(mesh.topology.edges.items()):
+    #     if edge.onBoundary():
+    #         continue
+    #     elens.append(mesh.length(edge))
+    # elens = torch.tensor(elens, device=uv.device).reshape(len(elens), 1)
 
-    if loss == "l1":
-        separation = elens * torch.nn.functional.l1_loss(e0, e1, reduction='none')
-    elif loss == 'l2':
-        separation = elens * torch.nn.functional.mse_loss(e0, e1, reduction='none')
+    # if loss == "l1":
+    #     separation = torch.nn.functional.l1_loss(e0, e1, reduction='none')
+    # elif loss == 'l2':
+    #     separation = torch.nn.functional.mse_loss(e0, e1, reduction='none')
+    if return_edge_correspondence:
+        return separation, edgecorrespondences
 
     return separation
 

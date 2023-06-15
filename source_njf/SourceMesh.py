@@ -127,6 +127,11 @@ class SourceMesh:
         self.poisson = self.mesh_processor.diff_ops.poisson_solver
 
         # First check if initialization cached
+        # TODO: Isometric initialization with curriculum learning (only sample limited range of rotations)
+
+
+        # TODO: SLIM initialization (not to convergence)
+
         # Precompute Tutte if set
         if self.init == "tutte":
             if os.path.exists(os.path.join(self.source_dir, "tuttefuv.pt")) and \

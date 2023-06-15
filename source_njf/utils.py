@@ -816,6 +816,54 @@ def run_slim(mesh, cut=True, verbose=False, time=False):
 
     return uvmap, energy, did_cut
 
+# Get Jacobian of UV map
+def get_jacobian(vs, fs, uvmap):
+    # Visualize distortion
+    from igl import grad
+    G = grad(vs, fs).todense()
+
+    # NOTE: currently gradient is organized as X1, X2, X3, ... Y1, Y2, Y3, ... Z1, Z2, Z3 ... resort to X1, Y1, Z1, ...
+    splitind = G.shape[0]//3
+    newG = np.zeros_like(G)
+    newG[::3] = G[:splitind]
+    newG[1::3] = G[splitind:2*splitind]
+    newG[2::3] = G[2*splitind:]
+
+    from scipy import sparse
+    newG = sparse.csc_matrix(newG)
+    J = (newG @ uvmap).reshape(-1, 3, 2).transpose(0,2,1) # F x 2 x 3
+    return J
+
+### Get edge correspondences of soup
+# Assumes we are indexing some node array V by taking V[fs] and then flattening
+def edge_soup_correspondences(fs):
+    from collections import defaultdict
+    edgecorrespondences = defaultdict(list) # {v1, v2} (original topology) => [(v1a, v2a), (v1b, v2b)] (soup vertices indexing F*3 x 3)
+    for fi in range(len(fs)):
+        f = fs[fi]
+        for i in range(3):
+            v1, v2 = f[i], f[(i+1)%3]
+            if v1 > v2:
+                edgekey = (v2, v1)
+
+                # Corresponding soup index
+                soupkey = (fi * 3 + (i+1)%3, fi * 3 + i)
+
+            else:
+                edgekey = (v1, v2)
+
+                # Corresponding soup index
+                soupkey = (fi * 3 + i, fi * 3 + (i+1)%3)
+
+            currentlist = edgecorrespondences[edgekey]
+            if len(currentlist) == 2:
+                raise ValueError("There should only be two edge correspondences per edge!")
+
+            # Find the corresponding index in the tutte vertex soup
+            currentlist.append(soupkey)
+
+    return edgecorrespondences
+
 class FourierFeatureTransform(torch.nn.Module):
     """
     An implementation of Gaussian Fourier feature mapping.
