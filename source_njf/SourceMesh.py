@@ -313,10 +313,10 @@ class SourceMesh:
 
                         if torch.any(~torch.isfinite(self.tuttej)):
                             print("Tutte Jacobians have NaNs!")
-
-                        set_new_tutte = True
+                        else:
+                            set_new_tutte = True
                     # Otherwise, just use the default Tutte
-                    else:
+                    if not set_new_tutte:
                         self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces)).unsqueeze(0) # 1 x F x 2
 
                         # Convert Tutte to 3-dim
@@ -499,7 +499,10 @@ class SourceMesh:
 
         # Use initialization jacobians as input
         if self.flatten == "input":
-            self.flat_vector = torch.cat([self.isoj, torch.zeros((self.isoj.shape[0], 1, 3))], dim=1).reshape(1, -1)
+            if self.init == "tutte":
+                self.flat_vector = self.tuttej.reshape(1, -1)
+            elif self.init == "isometric":
+                self.flat_vector = torch.cat([self.isoj, torch.zeros((self.isoj.shape[0], 1, 3))], dim=1).reshape(1, -1)
             # nchannels = self.centroids_and_normals.shape[1]
             # gsize = int(np.ceil(nchannels/9))
             # newchannels = []
