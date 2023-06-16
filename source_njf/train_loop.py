@@ -447,6 +447,8 @@ class MyNet(pl.LightningModule):
                 plot_uv(save_path, f"tutte init epoch {self.current_epoch:05}", tutteuv.squeeze().detach().cpu().numpy(),
                             tuttefaces, losses=None)
 
+                # TODO: sanity check that predv corresponds to the correct vertices in edgecorrespondences (should be soup!)
+
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
                     plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(),
@@ -458,6 +460,10 @@ class MyNet(pl.LightningModule):
             # Log the plotted imgs
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
                         [os.path.join(save_path, f"{key}_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+
+            if self.args.init == "tutte" and self.args.ninit == -1:
+                images = [os.path.join(save_path, f"tutte_init_epoch_{self.current_epoch:05}.png")] + images
+
             self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
 
             if "pred_V_opttrans" in batch_parts.keys():
