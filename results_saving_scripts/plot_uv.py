@@ -3,7 +3,7 @@ import numpy as np
 import os
 import fresnel
 
-def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=0.6, logger=None,
+def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=2, logger=None,
             ftoe=None):
     # First center the predicted vertices
     pred_vertices -= np.mean(pred_vertices, 0, keepdims=True) # Sum batched over faces, vertex dimension
@@ -51,12 +51,29 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
         for key, val in losses.items():
             if "loss" in key: # Hacky way of avoiding aggregated values
                 if "edge" in key and ftoe is not None:
-                    ftoeloss = np.array([np.sum(val[es]) for es in ftoe])
+                    edgecorrespondences = losses['edgegradloss']
+
+                    vtoeloss = np.zeros(len(pred_vertices))
+                    vtoecounts = np.zeros(len(pred_vertices))
+                    # flattris = triangles.flatten()
+                    count = 0
+                    for edgekey, v in sorted(edgecorrespondences.items()):
+                        # If only one correspondence, then it is a boundary
+                        if len(v) == 1:
+                            continue
+                        eloss = val[count]
+                        vtoeloss[list(v[0])] += eloss
+                        vtoeloss[list(v[1])] += eloss
+                        vtoecounts[list(v[0])] += 1
+                        vtoecounts[list(v[1])] += 1
+                        count += 1
+
+                    vtoeloss /= vtoecounts # Averages the loss per vertex by the num edges the vertex is incident to
                     fig, axs = plt.subplots(figsize=(5, 5))
                     fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
                     axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], ['black'] * len(pred_vertices), triangles=triangles, cmap=cmap,
-                                linewidth=0.5, vmin=cmin, vmax=cmax, facecolors=ftoeloss, edgecolor='black')
+                                linewidth=0.5, vmin=cmin, vmax=cmax, c=vtoeloss, edgecolor='black')
                     plt.axis('off')
                     axs.axis("equal")
                     plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)

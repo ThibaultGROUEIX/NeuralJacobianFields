@@ -90,6 +90,10 @@ class SourceMesh:
 
     ### PRECOMPUTATION HAPPENS HERE ###
     def __init_from_mesh_data(self, new_init=False):
+        from meshing.mesh import Mesh
+        from meshing.edit import EdgeCut
+        from meshing.io import PolygonSoup
+
         assert self.mesh_processor is not None
         self.mesh_processor.prepare_differential_operators_for_use(self.__ttype) #call 1
         self.source_vertices = torch.from_numpy(self.mesh_processor.get_vertices()).type(
@@ -147,17 +151,17 @@ class SourceMesh:
                 from utils import tutte_embedding, get_local_tris
 
                 vertices = self.source_vertices
+                device = vertices.device
                 faces = self.get_source_triangles()
-                fverts = vertices[faces].transpose(1,2)
+                mesh = Mesh(vertices.detach().cpu().numpy(), faces)
+                ogvs, ogfs, oges = mesh.export_soup()
+                vertices = torch.from_numpy(ogvs).to(device)
+                faces = torch.from_numpy(ogfs).long().to(device)
+                fverts = vertices[faces]
 
                 if new_init:
-                    from meshing.mesh import Mesh
-                    from meshing.edit import EdgeCut
-                    from meshing.io import PolygonSoup
-
                     rng = default_rng()
                     n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
-                    mesh = Mesh(vertices.detach().cpu().numpy(), faces)
 
                     prev_edge = None
                     prev_source = None
@@ -322,7 +326,7 @@ class SourceMesh:
                             set_new_tutte = True
                     # Otherwise, just use the default Tutte
                     if not set_new_tutte:
-                        self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces)).unsqueeze(0) # 1 x F x 2
+                        self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x F x 2
 
                         # Convert Tutte to 3-dim
                         self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
@@ -330,7 +334,7 @@ class SourceMesh:
                         # Get Jacobians
                         self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
                 else:
-                    self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces)).unsqueeze(0) # 1 x F x 2
+                    self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x F x 2
 
                     # Convert Tutte to 3-dim
                     self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
@@ -340,14 +344,16 @@ class SourceMesh:
 
                 # DEBUG: make sure we can get back the original UVs up to global translation
                 # NOTE: We compare triangle centroids bc face indexing gets messed up after cutting
-                ogmesh = Mesh(vertices.detach().cpu().numpy(), faces)
-                ogvs, ogfs, oges = ogmesh.export_soup()
-                fverts = torch.from_numpy(ogvs[ogfs]).transpose(1,2)
-                pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
+                fverts = torch.from_numpy(ogvs[ogfs])
+                # pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
+                pred_V = torch.einsum("abc,acd->abd", (fverts, self.tuttej[0,:,:2,:].transpose(2,1)))
+
                 if new_init and self.init == "tutte" and set_new_tutte:
                     checktutte = self.tutteuv[0,fs,:2]
+                    self.tuttefuv = self.tutteuv[:,fs,:2] # B x F x 3 x 2
                 else:
                     checktutte = self.tutteuv[0,faces,:2]
+                    self.tuttefuv = self.tutteuv[:,faces,:2] # B x F x 3 x 2
 
                 # diff = pred_V - checktutte
                 # diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
@@ -355,7 +361,6 @@ class SourceMesh:
 
                 ## Save the global translations
                 self.tuttetranslate = (checktutte - pred_V)[:,:,:2]
-                self.tuttefuv = self.tutteuv[:,faces,:2] # B x F x 3 x 2
 
                 # Cache everything
                 torch.save(self.tuttefuv, os.path.join(self.source_dir, "tuttefuv.pt"))
@@ -399,6 +404,10 @@ class SourceMesh:
                 vertices = self.source_vertices
                 device = vertices.device
                 faces = self.get_source_triangles()
+                mesh = Mesh(vertices.detach().cpu().numpy(), faces)
+                vs, fs, es = mesh.export_soup()
+                vertices = torch.from_numpy(vs).to(device)
+                faces = torch.from_numpy(fs).long().to(device)
                 fverts = vertices[faces]
 
                 # Random choice of local basis
@@ -433,7 +442,7 @@ class SourceMesh:
                 from meshing.mesh import Mesh
                 from meshing.analysis import computeFaceAreas
 
-                mesh = Mesh(vertices.detach().cpu().numpy(), faces)
+                mesh = Mesh(vertices.detach().cpu().numpy(), faces.detach().numpy())
                 computeFaceAreas(mesh)
                 fareas3d = mesh.fareas
                 fareas2d = 0.5 * np.abs(torch.linalg.det(torch.cat([torch.ones((len(self.isofuv), 1, 3)).float(), self.isofuv.transpose(2,1)], dim=1)).numpy())

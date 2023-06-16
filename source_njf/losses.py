@@ -114,7 +114,8 @@ class UVLoss:
 
         if self.args.lossgradientstitching:
             if self.args.lossgradientstitching == "cosine":
-                edgegradloss = uvgradloss(faces, uv)
+                edgegradloss, edgecorrespondences = uvgradloss(faces, uv, return_edge_correspondence=True)
+                self.currentloss[self.count]['edgecorrespondences'] = edgecorrespondences
             elif self.args.lossgradientstitching == "split":
                 edgegradloss = splitgradloss(vertices, faces, uv, cosine_weight=1, mag_weight=1)
 
@@ -276,7 +277,7 @@ def uvgradloss(fs, uv, return_edge_correspondence=False):
     edgecorrespondences = edge_soup_correspondences(fs.detach().cpu().numpy())
     e1 = []
     e2 = []
-    for k, v in edgecorrespondences.items():
+    for k, v in sorted(edgecorrespondences.items()):
         # If only one correspondence, then it is a boundary
         if len(v) == 1:
             continue

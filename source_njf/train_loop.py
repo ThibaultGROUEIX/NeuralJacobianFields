@@ -381,28 +381,32 @@ class MyNet(pl.LightningModule):
 
         ### Visualizations
         lossdict = batch_parts['lossdict']
-        # Construct mesh and ftoe matrix
-        mesh = Mesh(batch_parts["source_V"], batch_parts["ogT"])
-        # Face to edges map
-        ftoe = computeFacetoEdges(mesh)
 
-        # Remap indexing to ignore the boundaries
-        neweidx = []
-        oldeidx = []
-        count = 0
-        for key, edge in sorted(mesh.topology.edges.items()):
-            if not edge.onBoundary():
-                neweidx.append(count)
-                oldeidx.append(edge.index)
-                count += 1
-        ebdtoe = np.zeros(np.max(list(mesh.topology.edges.keys())) + 1)
-        ebdtoe[oldeidx] = neweidx
-        ebdtoe = ebdtoe.astype(int)
+        # Construct mesh
+        mesh = Mesh(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"])
 
-        new_ftoe = []
-        for es in ftoe:
-            new_ftoe.append(ebdtoe[es])
-        ftoe = new_ftoe
+        # NOTE: BELOW DEPRECATED -- we save the edge correspondences when we compute the edge losses!
+        # Ftoe matrix
+        # # Face to edges map
+        # ftoe = computeFacetoEdges(mesh)
+
+        # # Remap indexing to ignore the boundaries
+        # neweidx = []
+        # oldeidx = []
+        # count = 0
+        # for key, edge in sorted(mesh.topology.edges.items()):
+        #     if not edge.onBoundary():
+        #         neweidx.append(count)
+        #         oldeidx.append(edge.index)
+        #         count += 1
+        # ebdtoe = np.zeros(np.max(list(mesh.topology.edges.keys())) + 1)
+        # ebdtoe[oldeidx] = neweidx
+        # ebdtoe = ebdtoe.astype(int)
+
+        # new_ftoe = []
+        # for es in ftoe:
+        #     new_ftoe.append(ebdtoe[es])
+        # ftoe = new_ftoe
 
         # Log losses
         for key, val in lossdict[0].items():
@@ -432,6 +436,7 @@ class MyNet(pl.LightningModule):
 
         val_loss = batch_parts['loss'].item()
         if self.args.xp_type == "uv":
+            # NOTE: batch_parts['T'] = triangle soup indexing if no poisson solve
             # If recutting Tutte: then plot the original tutte uvs
             if self.args.init == "tutte" and self.args.ninit == -1:
                 source = batch[0]
@@ -445,10 +450,10 @@ class MyNet(pl.LightningModule):
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
                     plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(),
-                            batch_parts["T"][idx].squeeze(), losses=lossdict[idx], ftoe=ftoe)
+                            batch_parts["T"][idx].squeeze(), losses=lossdict[idx])
             else:
                 plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
-                        batch_parts["T"].squeeze(), losses=lossdict[0], ftoe=ftoe)
+                        batch_parts["T"].squeeze(), losses=lossdict[0])
 
             # Log the plotted imgs
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
@@ -457,7 +462,7 @@ class MyNet(pl.LightningModule):
 
             if "pred_V_opttrans" in batch_parts.keys():
                 plot_uv(save_path, f"opttrans epoch {self.current_epoch:05}", batch_parts["pred_V_opttrans"].squeeze().detach().cpu().numpy(),
-                            batch_parts["T"].squeeze(), losses=lossdict[0], ftoe=ftoe)
+                            batch_parts["T"].squeeze(), losses=lossdict[0])
 
                 # Log the plotted imgs
                 images = [os.path.join(save_path, f"opttrans_epoch_{self.current_epoch:05}.png")] + \
@@ -465,14 +470,32 @@ class MyNet(pl.LightningModule):
                 self.logger.log_image(key='opttrans uvs', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
+            # NOTE: mesh is original mesh topology (not soup)
             for key, val in lossdict[0].items():
                 if "loss" in key: # Hacky way of avoiding aggregated values
                     if "edge" in key:
-                        ftoeloss = np.array([np.sum(val[es]) for es in ftoe])
+                        # Vtoeloss: F*3 x 1 (vertices ordered by face indexing)
+                        edgecorrespondences = lossdict[0]['edgecorrespondences']
+
+                        # fresnel mesh: ordered by fverts flatten
+                        # Edgekey to edge loss map
+                        edgekeys = list(sorted(edgecorrespondences.keys()))
+                        edgekeytoeloss = {edgekeys[i]: i for i in range(len(edgekeys))}
+                        vtoeloss = np.zeros(len(mesh.faces)*3)
+                        count = 0
+                        for edgekey, v in sorted(edgecorrespondences.items()):
+                            # If only one correspondence, then it is a boundary
+                            if len(v) == 1:
+                                continue
+                            eloss = val[count]
+                            vtoeloss[list(v[0])] += eloss
+                            vtoeloss[list(v[1])] += eloss
+                            count += 1
+
                         export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
-                                    plotname=f"Sum {key}: {np.sum(ftoeloss):0.4f}",
-                                    fcolor_vals=ftoeloss, device="cpu", n_sample=25, width=200, height=200,
-                                    vmin=0, vmax=0.3, shading=False)
+                                    plotname=f"Sum {key}: {np.sum(vtoeloss):0.4f}",
+                                    vcolor_vals=vtoeloss, device="cpu", n_sample=25, width=200, height=200,
+                                    vmin=0, vmax=2, shading=False)
                     else:
                         export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(val):0.4f}",
@@ -559,8 +582,11 @@ class MyNet(pl.LightningModule):
             plt.close(fig)
             plt.cla()
 
-        vertices = source.get_vertices().to(self.device)
-        faces = torch.from_numpy(source.get_source_triangles()).long().to(self.device)
+        # Need to export mesh soup to get correct face to tutte uv indexing
+        mesh = Mesh(source.get_vertices().detach().cpu().numpy(), source.get_source_triangles())
+        vs, fs, es = mesh.export_soup()
+        vertices = torch.from_numpy(vs).float().to(self.device)
+        faces = torch.from_numpy(fs).long().to(self.device)
 
         if self.args.no_poisson:
             pred_J = self.predict_jacobians(source, target).squeeze() # NOTE: this takes B x F x 3 x 3 => F x 3 x 3
@@ -639,8 +665,8 @@ class MyNet(pl.LightningModule):
             print(
                 f"batch of {target.get_vertices().shape[0]:d} source <--> target pairs, each mesh {target.get_vertices().shape[1]:d} vertices, {source.get_source_triangles().shape[1]:d} faces")
         ret = {
-            "target_V": target.get_vertices().detach(),
-            "source_V": source.get_vertices().detach(),
+            "target_V": vertices.detach(),
+            "source_V": vertices.detach(),
             "pred_V": pred_V.detach(),
             "T": faces.detach().cpu().numpy(),
             'source_ind': source.source_ind,
