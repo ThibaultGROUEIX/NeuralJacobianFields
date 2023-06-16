@@ -50,11 +50,11 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
     if losses is not None:
         for key, val in losses.items():
             if "loss" in key: # Hacky way of avoiding aggregated values
-                if "edge" in key and ftoe is not None:
-                    edgecorrespondences = losses['edgegradloss']
+                if "edge" in key:
+                    edgecorrespondences = losses['edgecorrespondences']
 
                     vtoeloss = np.zeros(len(pred_vertices))
-                    vtoecounts = np.zeros(len(pred_vertices))
+                    vtoecounts = np.ones(len(pred_vertices))
                     # flattris = triangles.flatten()
                     count = 0
                     for edgekey, v in sorted(edgecorrespondences.items()):
@@ -92,7 +92,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                 # if logger is not None:
                 #     logger.experiment.log({f"{key}_{fname}": wandb.Image(os.path.join(path, f"{key}_{fname}.png"))})
 
-def export_views(mesh, savedir, n=5, n_sample=20, width=150, height=150, plotname="Views", filename="test", fcolor_vals=None,
+def export_views(vertices, faces, savedir, n=5, n_sample=20, width=150, height=150, plotname="Views", filename="test", fcolor_vals=None,
                  vcolor_vals=None, shading=True,
                  device="cpu", outline_width=0.005, cmap= plt.get_cmap("Reds"), vmin=0, vmax=1):
     import torch
@@ -101,7 +101,6 @@ def export_views(mesh, savedir, n=5, n_sample=20, width=150, height=150, plotnam
 
     fresnel_device = fresnel.Device(mode=device)
     scene = fresnel.Scene(device=fresnel_device)
-    vertices, faces, _ = mesh.export_soup()
     fverts = vertices[faces].reshape(3 * len(faces), 3)
     mesh = fresnel.geometry.Mesh(scene, vertices=fverts, N=1)
     mesh.material = fresnel.material.Material(color=fresnel.color.linear([0.25, 0.5, 0.9]), roughness=0.1)

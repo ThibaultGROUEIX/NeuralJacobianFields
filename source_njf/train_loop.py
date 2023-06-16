@@ -447,7 +447,6 @@ class MyNet(pl.LightningModule):
                 plot_uv(save_path, f"tutte init epoch {self.current_epoch:05}", tutteuv.squeeze().detach().cpu().numpy(),
                             tuttefaces, losses=None)
 
-                # TODO: sanity check that predv corresponds to the correct vertices in edgecorrespondences (should be soup!)
 
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
@@ -456,6 +455,7 @@ class MyNet(pl.LightningModule):
             else:
                 plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
                         batch_parts["T"].squeeze(), losses=lossdict[0])
+
 
             # Log the plotted imgs
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
@@ -473,6 +473,10 @@ class MyNet(pl.LightningModule):
                 # Log the plotted imgs
                 images = [os.path.join(save_path, f"opttrans_epoch_{self.current_epoch:05}.png")] + \
                             [os.path.join(save_path, f"{key}_opttrans_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+
+                if self.args.init == "tutte" and self.args.ninit == -1:
+                    images = [os.path.join(save_path, f"tutte_init_epoch_{self.current_epoch:05}.png")] + images
+
                 self.logger.log_image(key='opttrans uvs', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
@@ -488,6 +492,7 @@ class MyNet(pl.LightningModule):
                         edgekeys = list(sorted(edgecorrespondences.keys()))
                         edgekeytoeloss = {edgekeys[i]: i for i in range(len(edgekeys))}
                         vtoeloss = np.zeros(len(mesh.faces)*3)
+                        vtoecounts = np.ones(len(vtoeloss))
                         count = 0
                         for edgekey, v in sorted(edgecorrespondences.items()):
                             # If only one correspondence, then it is a boundary
@@ -496,14 +501,18 @@ class MyNet(pl.LightningModule):
                             eloss = val[count]
                             vtoeloss[list(v[0])] += eloss
                             vtoeloss[list(v[1])] += eloss
+                            vtoecounts[list(v[0])] += 1
+                            vtoecounts[list(v[1])] += 1
                             count += 1
+                        vtoeloss /= vtoecounts
 
-                        export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        # NOTE: can't let mesh re-export the faces because the indexing will be off
+                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(vtoeloss):0.4f}",
                                     vcolor_vals=vtoeloss, device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=2, shading=False)
                     else:
-                        export_views(mesh, save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(val):0.4f}",
                                     fcolor_vals=val, device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=0.6, shading=False)
@@ -519,7 +528,7 @@ class MyNet(pl.LightningModule):
                 self.logger.log_image(key='poisson uvs', images=images, step=self.current_epoch)
 
 
-                export_views(mesh, save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
+                export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
                             plotname=f"Poisson Distortion Loss: {np.sum(batch_parts['poissonDistortion']):0.4f}",
                             fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
                             vmin=0, vmax=0.6, shading=False)
@@ -545,7 +554,7 @@ class MyNet(pl.LightningModule):
                             vcut_vals.append(0)
                 vcut_vals = np.array(vcut_vals)
 
-                export_views(mesh, save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
+                export_views(vs, fs, save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
                             plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
                             vcolor_vals= vcut_vals, device="cpu", n_sample=25, width=200, height=200,
                             vmin=0, vmax=1, outline_width=0.005, shading=False)
@@ -1169,14 +1178,24 @@ def main(gen, args):
         if os.path.exists(testcache):
             clear_directory(testcache)
 
-    if trainer.precision == 16 or "16" in trainer.precision:
-        use_dtype = torch.half
-    elif trainer.precision == 32 or "32" in trainer.precision:
-        use_dtype = torch.float
-    elif trainer.precision == 64 or "64" in trainer.precision:
-        use_dtype = torch.double
+    if isinstance(trainer.precision, int):
+        if trainer.precision == 16:
+            use_dtype = torch.half
+        elif trainer.precision == 32:
+            use_dtype = torch.float
+        elif trainer.precision == 64:
+            use_dtype = torch.double
+        else:
+            raise Exception("trainer's precision is unexpected value")
     else:
-        raise Exception("trainer's precision is unexpected value")
+        if "16" in trainer.precision:
+            use_dtype = torch.half
+        elif "32" in trainer.precision:
+            use_dtype = torch.float
+        elif "64" in trainer.precision:
+            use_dtype = torch.double
+        else:
+            raise Exception("trainer's precision is unexpected value")
 
     train_dataset = DeformationDataset(train_pairs, gen.get_keys_to_load(True),
                                        gen.get_keys_to_load(False), use_dtype, train=True, args=args)

@@ -360,6 +360,7 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
         trisoup: F x 3 x 2 np array
 
         returns: F x 2 numpy array with optimized translations per triangle"""
+    # TODO: Update the edge correspondence code to take just the faces array and call edge_soup_correspondence!
     from meshing.mesh import Mesh
     from meshing.analysis import computeFacetoEdges
 
