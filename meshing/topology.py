@@ -110,7 +110,10 @@ class Topology():
 
                 # point the new halfedge and face to each other
                 h.face = f
-                f.halfedge = h
+
+                # NOTE: Need to map first halfedge to face to maintain input indexing
+                if J == 0:
+                    f.halfedge = h
 
                 # swap if i > j
                 key = (i, j) if i <= j else (j, i)

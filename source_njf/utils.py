@@ -61,21 +61,6 @@ def tutte_embedding(vertices, faces):
     import igl
     bnd = igl.boundary_loop(faces)
 
-    ## If mesh is closed then we cut a seam if set
-    # if fixclosed and (bnd is None or len(bnd) == 0):
-    #     from meshing.mesh import Mesh
-    #     from meshing.edit import EdgeCut
-
-    #     # TODO: cut out a triangle
-    #     mesh = Mesh(vertices, faces)
-    #     # for he in mesh.topology.faces[0].adjacentHalfedges():
-    #     #     EdgeCut(mesh, he.index).apply()
-
-    #     he2 = mesh.topology.halfedges[0].next.index
-    #     EdgeCut(mesh, 0).apply()
-    #     EdgeCut(mesh, he2).apply()
-    #     bnd = igl.boundary_loop(faces)
-
     if bnd is None:
         raise ValueError(f"tutte_embedding: mesh has no boundary! set fixclosed = True to try to cut to disk topology.")
 
@@ -513,62 +498,209 @@ def polyscope_edge_perm(mesh):
     return np.array(edge_p)
 
 # ====================== UV Stuff ========================
-def make_cut(mesh, cutlist, b0=None, b1=None):
+def make_cut(mesh, cutlist):
     from meshing.edit import EdgeCut
 
     for i in range(len(cutlist)-1):
-        # Cut: 1 new vertex, 1 new edge, two new halfedges
-        # Find the halfedge associated with each successive cut
         vsource = cutlist[i]
         vtarget = cutlist[i+1]
 
-        # Instead of assert, just continue if broken
-        if not mesh.topology.vertices[vsource].onBoundary():
-            continue
-        if not vtarget in [v.index for v in mesh.topology.vertices[vsource].adjacentVertices()]:
-            continue
-        # assert mesh.topology.vertices[vsource].onBoundary()
-        # assert vtarget in [v.index for v in mesh.topology.vertices[vsource].adjacentVertices()]
+        ## Unit tests
+        # Source vertex should be on boundary
+        assert mesh.topology.vertices[vsource].onBoundary()
 
         for he in mesh.topology.vertices[vsource].adjacentHalfedges():
             if he.tip_vertex().index == vtarget:
                 break
-        edt = EdgeCut(mesh, he.index)
-        edt.apply()
-        del edt
 
-        # assert np.all(mesh.vertices[vsource] == mesh.vertices[-1])
+        try:
+            edt = EdgeCut(mesh, he.edge.index, vsource, cutbdry=True)
+            edt.apply()
+            del edt
+        except Exception as e:
+            print(e)
+            return False
 
-    # b0 and b1 should iterate through same set of vertices
-    if b0 is not None and b1 is not None:
-        b0_v = set([v.index for v in mesh.topology.boundaries[b0].adjacentVertices()])
-        b1_v = set([v.index for v in mesh.topology.boundaries[b1].adjacentVertices()])
+    return True
 
-        # Debugging
-        if b0_v != b1_v:
-            import polyscope as ps
-            ps.init()
-            ps.remove_all_structures()
-            ps_mesh = ps.register_surface_mesh("mesh", mesh.vertices, mesh.faces, edge_width=1)
-            b0_colors = np.zeros(len(mesh.vertices))
-            b0_colors[list(b0_v)] = 1
-            b1_colors = np.zeros(len(mesh.vertices))
-            b1_colors[list(b1_v)] = 1
-            ps_mesh.add_scalar_quantity("b0", b0_colors, enabled=True)
-            ps_mesh.add_scalar_quantity("b1", b1_colors, enabled=True)
-            ps.show()
+def generate_random_cuts(mesh, enforce_disk_topo=True, diskmode='SHORTEST', max_cuts=10, verbose=False):
+    """ Generate random cuts on mesh -- enforce disk topology if necessary
 
-        # assert b0_v == b1_v, f"Boundaries {b0} and {b1} do not coincide after cut!"
+    Args:
+        mesh (Mesh): halfedge mesh data structure
+        enforce_disk_topo (bool, optional): Whether to enforce disk topology. Defaults to True.
+        diskmode (str, optional): Type of path to cut to disk. Options {SHORTEST, RANDOM}. Defaults to 'SHORTEST'.
+    """
+    from meshing.edit import EdgeCut
 
-        # Delete second boundary
-        del mesh.topology.boundaries[b1]
+    cutvs = []
+    while max_cuts > 0:
+        valid = False
+        while not valid:
+            edgei = np.random.randint(0, len(mesh.topology.edges))
+            edge = mesh.topology.edges[edgei]
 
-def cut_to_disk(mesh, verbose=False):
+            if edge.onBoundary():
+                continue
+
+            # Having both vertices on boundary is okay as long as they are different boundaries!
+            if edge.halfedge.vertex.onBoundary() and edge.halfedge.twin.vertex.onBoundary():
+                v1bd = None
+                for he in edge.halfedge.vertex.adjacentHalfedges():
+                    if he.onBoundary:
+                        v1bd = he.face
+                        break
+                v2bd = None
+                for he in edge.halfedge.twin.vertex.adjacentHalfedges():
+                    if he.onBoundary:
+                        v2bd = he.face
+                        break
+                if v1bd is None or v2bd is None:
+                    raise ValueError("Boundary topology is bugged! Vertices on boundary but no halfedge boundary found.")
+                valid = v1bd != v2bd
+            else:
+                valid = True
+
+        # If vertex is starting on boundary, then this is simple cut case
+        if edge.halfedge.vertex.onBoundary() and edge.halfedge.twin.vertex.onBoundary():
+            sourcev = edge.halfedge.vertex.index
+            targetv = edge.halfedge.twin.vertex.index
+
+            cut_vs = [mesh.vertices[sourcev], mesh.vertices[targetv]]
+            cutvs.append(np.stack(cut_vs))
+
+            # Visualize the cuts
+            # ps.remove_all_structures()
+            # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
+            # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
+            # currentcut = np.array(cutvs)
+            # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
+            # ps.show()
+
+            EdgeCut(mesh, edgei, sourcev, cutbdry=True).apply()
+
+        elif edge.halfedge.vertex.onBoundary() or edge.halfedge.twin.vertex.onBoundary():
+            sourcev = edge.halfedge.vertex.index if edge.halfedge.vertex.onBoundary() else edge.halfedge.twin.vertex.index
+            targetv = edge.halfedge.vertex.index if edge.halfedge.twin.vertex.onBoundary() else edge.halfedge.twin.vertex.index
+
+            cut_vs = [mesh.vertices[sourcev], mesh.vertices[targetv]]
+            cutvs.append(np.stack(cut_vs))
+
+            # Visualize the cuts
+            # ps.remove_all_structures()
+            # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
+            # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
+            # currentcut = np.array(cutvs)
+            # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
+            # ps.show()
+
+            EdgeCut(mesh, edgei, sourcev).apply()
+
+        else:
+            # Need to sample a second edge (not on boundary)
+            e2_candidates = [e.index for e in edge.halfedge.vertex.adjacentEdges() if not e.onBoundary() and e != edge] + \
+                        [e.index for e in edge.halfedge.twin.vertex.adjacentEdges() if not e.onBoundary() and e != edge]
+            if len(e2_candidates) == 0:
+                continue
+            else:
+                e2_i = np.random.choice(e2_candidates)
+
+            # Sourcev is shared vertex between the two edges
+            presourcev = edge.halfedge.twin.vertex
+            sourcev = edge.halfedge.vertex
+            otheredge = mesh.topology.edges[e2_i]
+            targetv = otheredge.halfedge.vertex
+            if sourcev not in mesh.topology.edges[e2_i].two_vertices():
+                sourcev = edge.halfedge.twin.vertex
+                presourcev = edge.halfedge.vertex
+            if targetv in edge.two_vertices():
+                targetv = otheredge.halfedge.twin.vertex
+            assert sourcev in mesh.topology.edges[e2_i].two_vertices()
+            assert presourcev not in mesh.topology.edges[e2_i].two_vertices()
+            assert targetv not in edge.two_vertices()
+            sourcev = sourcev.index
+            targetv = targetv.index
+            presourcev = presourcev.index
+
+            cut_vs = [mesh.vertices[presourcev], mesh.vertices[sourcev], mesh.vertices[targetv]]
+            cutvs.append(np.stack(cut_vs))
+
+            # Visualize the cuts
+            # ps.remove_all_structures()
+            # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
+            # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
+            # currentcut = np.array(cutvs)
+            # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
+            # ps.show()
+
+            # Actual edge should be second edge
+            edge = mesh.topology.edges[e2_i]
+
+            EdgeCut(mesh, edgei, sourcev, cutbdry=True, e2_i=e2_i).apply()
+
+        max_cuts -= (len(cut_vs) - 1)
+
+    # Check for disk topology condition
+    if enforce_disk_topo and not mesh.is_disk_topology():
+        print("Cut mesh is not disk topology. Generating cuts to enforce disk topology.")
+        cutvs.extend(cut_to_disk(mesh, mode=diskmode, limit=1000))
+
+    return cutvs
+
+def cut_to_disk(mesh, mode='SHORTEST', verbose=False, limit=10):
+    """ Cuts mesh to topological disk if necessary
+
+    Args:
+        mesh (Mesh): halfedge mesh data structure
+        mode (str, optional): Type of path to cut. Options {SHORTEST, RANDOM}. Defaults to 'SHORTEST'.
+    """
+    from meshing.edit import EdgeCut
     count = 0
+    cutvs = []
 
     # Don't allow cut if mesh has isolated faces
     if mesh.topology.hasIsolatedFaces():
-        return
+        print("Mesh has isolated faces! Cannot cut to disk.")
+        return cutvs
+
+    # If mesh has no boundaries, then cut two edges to make a boundary
+    if len(mesh.topology.boundaries) == 0:
+        ei = np.random.choice(len(mesh.topology.edges))
+        edge = mesh.topology.edges[ei]
+        sourcev = edge.halfedge.tip_vertex()
+        sourcevi = sourcev.index
+        ei2 = np.random.choice(list(e.index for e in sourcev.adjacentEdges() if e != edge))
+
+        # Cut
+        EdgeCut(mesh, ei, sourcevi, e2_i= ei2).apply()
+
+        # Get second edge
+        edge2 = mesh.topology.edges[ei2]
+        v1, v2 = edge2.two_vertices()
+        sourcev2 = v1 if v2 == sourcev else v2
+        edge3 = None
+        for e in sourcev2.adjacentEdges():
+            v1, v2 = e.two_vertices()
+            if e.index != ei2 and not e.onBoundary() and (not v1.onBoundary() or not v2.onBoundary()):
+                edge3 = e
+                break
+
+        # Debugging: visualize cut
+        # import polyscope as ps
+        # ps.init()
+        # ps.remove_all_structures()
+        # vs, fs, es = mesh.export_soup()
+        # ps_mesh = ps.register_surface_mesh("mesh", vs, fs)
+        # ps_mesh.set_edge_permutation(polyscope_edge_perm(mesh))
+        # ecolors = np.zeros(len(es))
+        # ecolors[[ei, ei2, edge3.index]] = 1
+        # ps_mesh.add_scalar_quantity("cut es", ecolors, defined_on='edges', enabled=True)
+        # ps.show()
+
+        EdgeCut(mesh, edge3.index, sourcev2.index).apply()
+
+        tmpcuts = mesh.vertices[[edge.halfedge.vertex.index, sourcevi, sourcev2.index]]
+        cutvs.append(tmpcuts)
 
     while len(mesh.topology.boundaries) > 1:
         if verbose:
@@ -597,10 +729,7 @@ def cut_to_disk(mesh, verbose=False):
         edgeweights = [mesh.length(e) for e in mesh.topology.edges.values()]
         graph = ig.Graph(len(vs), es)
 
-        # Compute shortest paths from current boundary vertices to all other boundary vertices
         b_vs = np.array([v.index for b in avail_b for v in mesh.topology.boundaries[b].adjacentVertices()])
-        # Sometimes two boundaries share vertex
-        # b_vs = np.array(list(set(b_vs).difference(set(subboundary_vs))))
 
         if len(b_vs) == 0:
             print(f"Overlapping boundaries!")
@@ -610,51 +739,66 @@ def cut_to_disk(mesh, verbose=False):
             print(f"Iteration {count}: graph construct time {time.time() - t0:0.2f} sec.")
             t0 = time.time()
 
-        # Heuristic: initialize to first vertex in subboundary, and compute all shortest paths to all other boundaries
-        # Choose shortest path and cut
-        cutlists = []
-        for init_v in subboundary_vs:
-            tmpcutlists = graph.get_shortest_paths(init_v, b_vs, edgeweights)
-            if len(tmpcutlists) > 0:
-                cutlists.extend(tmpcutlists)
-        if len(cutlists) == 0:
-            print("No more paths found.")
-            break
-        # Remove all 0 length paths
-        cutlists = [cutlist for cutlist in cutlists if len(cutlist) > 0]
-        if len(cutlists) == 0:
-            print("No more paths found.")
-            break
-        cutlens = [len(cut) for cut in cutlists]
-        cutlist = cutlists[np.argmin(cutlens)]
-        if verbose:
-            print(f"Iteration {count}: shortest path calc {time.time() - t0:0.2f} sec.")
-            print(f"\tCutlist {cutlist}. # boundaries: {len(mesh.topology.boundaries)}")
-            t0 = time.time()
+        if mode == "SHORTEST":
+            # Heuristic: initialize to first vertex in subboundary, and compute all shortest paths to all other boundaries
+            # Choose shortest path and cut
+            cutlists = []
+            for init_v in subboundary_vs:
+                tmpcutlists = graph.get_shortest_paths(init_v, b_vs, edgeweights)
+                if len(tmpcutlists) > 0:
+                    cutlists.extend(tmpcutlists)
+            # All cut lists must be at least length 2
+            cutlists = [cutlist for cutlist in cutlists if len(cutlist) >= 2]
+            if len(cutlists) == 0:
+                print("No more paths found.")
+                return cutvs
 
-        # Get boundary of target
-        shortest_target = cutlist[-1]
-        for b in avail_b:
-            if shortest_target in [v.index for v in mesh.topology.boundaries[b].adjacentVertices()]:
-                next_b = b
-                break
-        make_cut(mesh, cutlist, current_b, next_b)
+            cutlens = [len(cut) for cut in cutlists]
+            cutlist = cutlists[np.argmin(cutlens)]
+            if verbose:
+                print(f"Iteration {count}: shortest path calc {time.time() - t0:0.2f} sec.")
+                print(f"\tCutlist {cutlist}. # boundaries: {len(mesh.topology.boundaries)}")
+                t0 = time.time()
+
+            # Get boundary of target
+            shortest_target = cutlist[-1]
+            for b in avail_b:
+                if shortest_target in [v.index for v in mesh.topology.boundaries[b].adjacentVertices()]:
+                    next_b = b
+                    break
+
+        elif mode == "RANDOM":
+            random_source = np.random.choice(subboundary_vs)
+            random_target = np.random.choice(b_vs)
+
+            allpaths = list(graph.get_all_simple_paths(random_source, random_target))
+
+            # Restrict to valid paths (length >= 2)
+            allpaths = [path for path in allpaths if len(path) >= 2]
+
+            if len(allpaths) == 0:
+                print("No valid random cut paths found.")
+                return cutvs
+
+            cutlist = allpaths[np.random.choice(len(allpaths))]
+
+        success = make_cut(mesh, cutlist)
         count += 1
+        cutvs.append(mesh.vertices[cutlist])
+
         if verbose:
             print(f"Iteration {count}: cutting took {time.time() - t0:0.2f} sec.")
             t0 = time.time()
 
-        # if mesh.topology.hasNonManifoldVertices() or mesh.topology.hasNonManifoldEdges():
-        #     print(f"Mesh became non-manifold from cuts!")
-        #     break
+        if not success:
+            print(f"Disk cutting not successful!")
+            return cutvs
 
-        if mesh.topology.hasNonManifoldEdges():
-            print(f"Mesh became non-manifold from cuts!")
-            break
+        if count >= limit:
+            print(f"# Boundaries exceeded limit {limit}!")
+            return cutvs
 
-        if count >= 10:
-            print(f"Cuts infinite loop.")
-            break
+    return cutvs
 
 def cut_to_disk_single(mesh, singular_vs, verbose=False):
     count = 0
@@ -753,7 +897,7 @@ def cut_vertex(mesh, vind):
 
         heset = heset.difference(visited)
 
-def run_slim(mesh, cut=True, verbose=False, time=False):
+def run_slim(mesh, cut=True, verbose=False, time=False, max_boundaries=20):
     did_cut = False
     if mesh.topology.hasNonManifoldEdges():
         print(f"run_slim: Non-manifold edges found.")
@@ -765,37 +909,37 @@ def run_slim(mesh, cut=True, verbose=False, time=False):
             t0 = time.time()
 
         # Check for nonmanifold vertices while only one boundary
-        if mesh.topology.hasNonManifoldVertices():
-            print(f"Cutting nonmanifold vertices: {mesh.topology.nonmanifvs}")
-            for vind in mesh.topology.nonmanifvs:
-                cut_vertex(mesh, vind)
+        # if mesh.topology.hasNonManifoldVertices():
+        #     print(f"Cutting nonmanifold vertices: {mesh.topology.nonmanifvs}")
+        #     for vind in mesh.topology.nonmanifvs:
+        #         cut_vertex(mesh, vind)
 
-        if len(mesh.topology.boundaries) > 1:
-            cut_to_disk(mesh, verbose)
+        if len(mesh.topology.boundaries) == 0 or len(mesh.topology.boundaries) > 1:
+            cut_to_disk(mesh, mode='SHORTEST', verbose=verbose, limit=max_boundaries)
             did_cut = True
 
         # Check for nonmanifold vertices while only one boundary
-        if mesh.topology.hasNonManifoldVertices():
-            print(f"Cutting nonmanifold vertices: {mesh.topology.nonmanifvs}")
-            for vind in mesh.topology.nonmanifvs:
-                cut_vertex(mesh, vind)
+        # if mesh.topology.hasNonManifoldVertices():
+        #     print(f"Cutting nonmanifold vertices: {mesh.topology.nonmanifvs}")
+        #     for vind in mesh.topology.nonmanifvs:
+        #         cut_vertex(mesh, vind)
 
-        if not hasattr(mesh, "vertexangle"):
-            from meshing.analysis import computeVertexAngle
-            computeVertexAngle(mesh)
+        # if not hasattr(mesh, "vertexangle"):
+        #     from meshing.analysis import computeVertexAngle
+        #     computeVertexAngle(mesh)
 
         # Cut cones
         # Only cut cones if one boundary exists
-        singlevs = np.where(2 * np.pi - mesh.vertexangle >= np.pi/2)[0]
-        if len(singlevs) >= 0 and len(mesh.topology.boundaries) == 1: # Edge case: no boundaries
-            cut_to_disk_single(mesh, singlevs, verbose)
-            did_cut = True
+        # singlevs = np.where(2 * np.pi - mesh.vertexangle >= np.pi/2)[0]
+        # if len(singlevs) >= 0 and len(mesh.topology.boundaries) == 1: # Edge case: no boundaries
+        #     cut_to_disk_single(mesh, singlevs, verbose)
+        #     did_cut = True
 
         # Check for nonmanifold vertices while only one boundary
-        if mesh.topology.hasNonManifoldVertices():
-            print(f"Cutting nonmanifold vertices: {mesh.topology.nonmanifvs}")
-            for vind in mesh.topology.nonmanifvs:
-                cut_vertex(mesh, vind)
+        # if mesh.topology.hasNonManifoldVertices():
+        #     print(f"Cutting nonmanifold vertices: {mesh.topology.nonmanifvs}")
+        #     for vind in mesh.topology.nonmanifvs:
+        #         cut_vertex(mesh, vind)
 
         # Don't parameterize nonmanifold after cut
         if mesh.topology.hasNonManifoldEdges():

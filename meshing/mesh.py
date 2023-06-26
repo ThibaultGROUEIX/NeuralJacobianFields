@@ -118,6 +118,10 @@ class Mesh:
 
         return vertices, face_conn
 
+    def is_disk_topology(self):
+        ret = len(self.topology.boundaries) == 1
+        return ret
+
     def normalize(self, copy_v=False):
         if copy_v:
             import copy

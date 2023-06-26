@@ -395,11 +395,10 @@ def do_collapse(mesh, e_id):
 
 class EdgeCut():
     def __init__(
-        self, mesh, e_i, startv, splitf, cutbdry=False, e2_i = None
+        self, mesh, e_i, startv, cutbdry=False, e2_i = None
     ):
         """ e_i: index of edge to cut
-            startv: where to start the cut (determines the direction of cut)
-            splitf: index of face to assign the new primitives to (must be adjacent to the cut edge)
+            startv: where to start the cut (determines the direction of cut). If cutting two edges, then must be incident to both.
             e2_i: index of second edge to cut (must be specified if cutting middle of mesh)
             """
         self.mesh = mesh
@@ -408,35 +407,15 @@ class EdgeCut():
 
         # Unit testing
         assert startv in [v.index for v in mesh.topology.edges[e_i].two_vertices()], f"Start vertex must be on the chosen cut edge!"
-
         self.startv = startv
-
-        e_faces = [mesh.topology.edges[e_i].halfedge.face.index, mesh.topology.edges[e_i].halfedge.twin.face.index]
-        assert splitf in e_faces, f"splitf needs to be one of the faces adjacent to the cut edge!"
-
-        self.splitf = splitf
 
         if e2_i is not None:
             assert startv in [v.index for v in mesh.topology.edges[e2_i].two_vertices()], f"Start vertex must be on e2_i!"
-
-        # if splitf2 is not None:
-        #     e_faces = [mesh.topology.edges[e2_i].halfedge.face.index, mesh.topology.edges[e2_i].halfedge.twin.face.index]
-        #     assert splitf2 in e_faces, f"splitf2 needs to be one of the faces adjacent to e2_i!"
-
-        #     # Splitf2 and splitf must be on same side (share an edge)
-        #     splitf_es = set(mesh.topology.faces[splitf].adjacentEdges())
-        #     splitf2_es = set(mesh.topology.faces[splitf2].adjacentEdges())
-        #     assert len(splitf_es.intersection(splitf2_es)) == 1, f"splitf and splitf2 must share an edge!"
 
         self.e2_i = e2_i
 
     def apply(self):
         he = self.mesh.topology.edges[self.e_i].halfedge
-
-        # NOTE: halfedge should be on specified face
-        if he.face.index != self.splitf:
-            he = he.twin
-            assert he.face.index == self.splitf, f"Neither halfedge on edge is incident to the chosen splitf face."
 
         sourcev = self.mesh.topology.vertices[self.startv]
         targetv = he.tip_vertex() if sourcev != he.tip_vertex() else he.vertex
@@ -664,7 +643,7 @@ class EdgeCut():
 
             ### Subcase 1: sourcev is incident to he (first face)
             if he.vertex == sourcev:
-                ## If sourcev on he, then splitf2 is on opposite side of fan
+                ## If sourcev on he, then splitf2 is twin of the end of the fan
                 currenthe = he
                 while currenthe.edge.index != self.e2_i:
                     currenthe = currenthe.twin.next
@@ -728,7 +707,7 @@ class EdgeCut():
                 newh4.edge = otherhe.edge
                 otherhe.edge.halfedge = newh4
 
-                # Reassign vertex fans (on splitf/splitf2 side)
+                # Reassign vertex fans (on splitf/splitf2 side) (assume CCW orientation!)
                 currenthe = newh2
                 stophe = he
                 while currenthe != stophe:
@@ -851,7 +830,7 @@ class EdgeCut():
                 newh3.edge = otherhe2.edge
                 otherhe2.edge.halfedge = newh3
 
-                # Reassign vertex fans (on splitf/splitf2 side)
+                # Reassign vertex fans (on splitf/splitf2 side) (assume CCW orientation!)
                 currenthe = newh1
                 stophe = he2
                 while currenthe != stophe:
