@@ -16,14 +16,14 @@ class UVExperiment(Experiment):
 if __name__ == '__main__':
     # Set wandb
     # NOTE: WANDB_DIR MUST EXIST
-    # os.environ['WANDB_DIR'] = "/net/scratch/rliu/.cache/wandb"
-    # os.environ['WANDB_CACHE_DIR'] = "/net/scratch/rliu/.cache/wandb"
-    # os.environ['WANDB_DATA_DIR'] = "/net/scratch/rliu/.cache/wandb"
+    os.environ['WANDB_DIR'] = "/net/scratch/rliu/.cache/wandb"
+    os.environ['WANDB_CACHE_DIR'] = "/net/scratch/rliu/.cache/wandb"
+    os.environ['WANDB_DATA_DIR'] = "/net/scratch/rliu/.cache/wandb"
 
-    # # Wandb prune cache
-    # import wandb
-    # c = wandb.wandb_sdk.wandb_artifacts.get_artifacts_cache()
-    # c.cleanup(int(1e11))
+    # Wandb prune cache
+    import wandb
+    c = wandb.wandb_sdk.wandb_artifacts.get_artifacts_cache()
+    c.cleanup(int(1e11))
 
     #this parses the command line arguments and then trains on the given dataset with the given experiment
     args = args_from_cli.parse_args()

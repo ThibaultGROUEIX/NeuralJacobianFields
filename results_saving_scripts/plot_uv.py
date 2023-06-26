@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from matplotlib.tri import Triangulation
 import numpy as np
 import os
 import fresnel
@@ -7,6 +8,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
             ftoe=None):
     # First center the predicted vertices
     pred_vertices -= np.mean(pred_vertices, 0, keepdims=True) # Sum batched over faces, vertex dimension
+    tris = Triangulation(pred_vertices[:, 0], pred_vertices[:, 1], triangles=triangles)
 
     # setup side by side plots
     fname = "_".join(name.split())
@@ -18,14 +20,15 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
         axs[0].set_title('GT')
         axs[0].axis('equal')
 
-        axs[0].triplot(gt_vertices[:,0], gt_vertices[:,1], triangles, linewidth=0.5)
+        gt_tris = Triangulation(gt_vertices[:,0], gt_vertices[:,1], triangles)
+        axs[0].triplot(gt_tris, linewidth=0.5)
 
         # plot ours
         axs[1].set_title('Ours')
         axs[1].axis('equal')
         # axs[1].set_axis_off()
 
-        axs[1].triplot(pred_vertices[:,0], pred_vertices[:,1], triangles, linewidth=0.5)
+        axs[1].triplot(tris, linewidth=0.5)
         plt.axis('off')
         plt.savefig(os.path.join(path, f"{fname}.png"))
         plt.close(fig)
@@ -34,7 +37,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
         fig, axs = plt.subplots(figsize=(5, 5))
         # plot ours
         axs.set_title(name)
-        axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles=triangles, facecolors=np.ones(len(triangles)) * 0.5,
+        axs.tripcolor(tris, facecolors=np.ones(len(triangles)) * 0.5,
                                 linewidth=0.5, edgecolor="black")
         plt.axis('off')
         axs.axis('equal')
@@ -72,8 +75,8 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     fig, axs = plt.subplots(figsize=(5, 5))
                     fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
-                    axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], ['black'] * len(pred_vertices), triangles=triangles, cmap=cmap,
-                                linewidth=0.5, vmin=cmin, vmax=cmax, c=vtoeloss, edgecolor='black')
+                    axs.tripcolor(tris, vtoeloss, cmap=cmap,
+                                linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor='black')
                     plt.axis('off')
                     axs.axis("equal")
                     plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)
@@ -82,7 +85,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     fig, axs = plt.subplots(figsize=(5,5))
                     fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
-                    axs.tripcolor(pred_vertices[:, 0], pred_vertices[:, 1], triangles=triangles, facecolors=val[:len(triangles)], cmap=cmap,
+                    axs.tripcolor(tris, val[:len(triangles)], facecolors=val[:len(triangles)], cmap=cmap,
                                 linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor="black")
                     plt.axis('off')
                     axs.axis("equal")
@@ -93,7 +96,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                 #     logger.experiment.log({f"{key}_{fname}": wandb.Image(os.path.join(path, f"{key}_{fname}.png"))})
 
 def export_views(vertices, faces, savedir, n=5, n_sample=20, width=150, height=150, plotname="Views", filename="test", fcolor_vals=None,
-                 vcolor_vals=None, shading=True,
+                 vcolor_vals=None, shading=True, cylinders=None, cylinder_scalars=None,
                  device="cpu", outline_width=0.005, cmap= plt.get_cmap("Reds"), vmin=0, vmax=1):
     import torch
     import matplotlib as mpl
@@ -101,6 +104,26 @@ def export_views(vertices, faces, savedir, n=5, n_sample=20, width=150, height=1
 
     fresnel_device = fresnel.Device(mode=device)
     scene = fresnel.Scene(device=fresnel_device)
+
+    # Create cylinders (edges)
+    # cylinders: (N, 2, 3) where every row is endpoints of cylinders
+    if cylinders is not None:
+        geometry = fresnel.geometry.Cylinder(scene, N=len(cylinders))
+        geometry.material = fresnel.material.Material(color=fresnel.color.linear([0.5,0,0]),
+                                                    roughness=1)
+        geometry.points[:] = cylinders
+        geometry.radius[:] = np.ones(len(cylinders)) * outline_width * 2
+        geometry.material.solid = 1.0
+
+        if cylinder_scalars is not None: # Should be N x 2
+            norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+            scalarmap = cm.ScalarMappable(norm=norm, cmap=cmap)
+
+            cylinder_colors = scalarmap.to_rgba(cylinder_scalars)[:,:,:3] # N x 2 x 3
+            geometry.color[:] = cylinder_colors
+            geometry.material.primitive_color_mix = 1.0
+
+    # Create mesh
     fverts = vertices[faces].reshape(3 * len(faces), 3)
     mesh = fresnel.geometry.Mesh(scene, vertices=fverts, N=1)
     mesh.material = fresnel.material.Material(color=fresnel.color.linear([0.25, 0.5, 0.9]), roughness=0.1)

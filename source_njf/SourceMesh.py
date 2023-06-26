@@ -171,11 +171,46 @@ class SourceMesh:
                             edgei = np.random.randint(0, len(mesh.topology.edges))
                             edge = mesh.topology.edges[edgei]
                             splitf = edge.halfedge.face.index
-                            # If sampled boundary edge, then keep resampling
-                            while edge.onBoundary():
+                            # If sampled boundary edge, or both edge endpoints on same boundary, then keep resampling
+
+                            notvalid = edge.onBoundary()
+                            if edge.halfedge.vertex.onBoundary() and edge.halfedge.twin.vertex.onBoundary():
+                                v1bd = None
+                                for he in edge.halfedge.vertex.adjacentHalfedges():
+                                    if he.onBoundary:
+                                        v1bd = he.face
+                                        break
+                                v2bd = None
+                                for he in edge.halfedge.twin.vertex.adjacentHalfedges():
+                                    if he.onBoundary:
+                                        v2bd = he.face
+                                        break
+                                if v1bd is None or v2bd is None:
+                                    raise ValueError("Boundary topology is bugged! Vertices on boundary but no halfedge boundary found.")
+                                if v1bd == v2bd:
+                                    notvalid = True
+                            while notvalid:
                                 edgei = np.random.randint(0, len(mesh.topology.edges))
                                 edge = mesh.topology.edges[edgei]
                                 splitf = edge.halfedge.face.index
+
+                                notvalid = edge.onBoundary()
+                                if edge.halfedge.vertex.onBoundary() and edge.halfedge.twin.vertex.onBoundary():
+                                    v1bd = None
+                                    for he in edge.halfedge.vertex.adjacentHalfedges():
+                                        if he.onBoundary:
+                                            v1bd = he.face
+                                            break
+                                    v2bd = None
+                                    for he in edge.halfedge.twin.vertex.adjacentHalfedges():
+                                        if he.onBoundary:
+                                            v2bd = he.face
+                                            break
+                                    if v1bd is None or v2bd is None:
+                                        raise ValueError("Boundary topology is bugged! Vertices on boundary but no halfedge boundary found.")
+                                    if v1bd == v2bd:
+                                        notvalid = True
+
                             # If vertex is starting on boundary, then this is simple cut case
                             if edge.halfedge.vertex.onBoundary() or edge.halfedge.twin.vertex.onBoundary():
                                 sourcev = edge.halfedge.vertex.index if edge.halfedge.vertex.onBoundary() else edge.halfedge.twin.vertex.index
@@ -296,12 +331,14 @@ class SourceMesh:
                         prev_source = sourcev
 
                     # Unit test: mesh is still connected
-                    testsoup = PolygonSoup(mesh.vertices, mesh.faces)
+                    vs, fs, es = mesh.export_soup()
+                    testsoup = PolygonSoup(vs, fs)
                     n_components = testsoup.nConnectedComponents()
                     assert n_components == 1, f"After cutting found {n_components} components!"
 
-                    # New UVs/Jacobians from vertices based on cut topology
-                    vs, fs, es = mesh.export_soup()
+                    # Save new topology
+                    self.cutvs = vs
+                    self.cutfs = fs
 
                     # Only replace Tutte if no nan
                     newtutte = torch.from_numpy(tutte_embedding(vs, fs)).unsqueeze(0) # 1 x F x 2
@@ -333,6 +370,10 @@ class SourceMesh:
 
                         # Get Jacobians
                         self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
+
+                        # Reset cut topo to original topo
+                        self.cutvs = vertices.detach().cpu().numpy()
+                        self.cutfs = faces.detach().numpy()
                 else:
                     self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x F x 2
 
@@ -341,6 +382,10 @@ class SourceMesh:
 
                     # Get Jacobians
                     self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
+
+                    # Reset cut topo to original topo
+                    self.cutvs = vertices.detach().cpu().numpy()
+                    self.cutfs = faces.detach().numpy()
 
                 # DEBUG: make sure we can get back the original UVs up to global translation
                 # NOTE: We compare triangle centroids bc face indexing gets messed up after cutting

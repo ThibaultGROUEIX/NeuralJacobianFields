@@ -440,21 +440,35 @@ class MyNet(pl.LightningModule):
             # If recutting Tutte: then plot the original tutte uvs
             if self.args.init == "tutte" and self.args.ninit == -1:
                 source = batch[0]
-                initj = source.tuttej.squeeze().to(self.device)
-                initfuv = source.tuttefuv.squeeze().to(self.device)
-                tutteuv = initfuv.reshape(-1, 2)
-                tuttefaces = np.arange(len(tutteuv)).reshape(-1, 3)
+                tutteuv = source.tutteuv
+                tuttefaces = source.cutfs
                 plot_uv(save_path, f"tutte init epoch {self.current_epoch:05}", tutteuv.squeeze().detach().cpu().numpy(),
                             tuttefaces, losses=None)
 
+                # Also plot the full boundary
+                initfaces = batch_parts["ogT"]
+                cutmesh = Mesh(source.cutvs, source.cutfs)
+                totboundaries = []
+                for key, bd in sorted(cutmesh.topology.boundaries.items()):
+                    boundaryvs = []
+                    for v in bd.adjacentVertices():
+                        boundaryvs.append(cutmesh.vertices[v.index])
+                    bidx = np.array([[i, i+1] for i in range(len(boundaryvs)-1)] + [[len(boundaryvs)-1, 0]])
+                    totboundaries.append(np.array(boundaryvs)[bidx])
+                totboundaries = np.concatenate(totboundaries, axis=0)
+
+                export_views(source.cutvs, source.cutfs, save_path, filename=f"boundary_mesh_{self.current_epoch:05}.png",
+                                plotname=f"Initial Mesh Boundary", cylinders=totboundaries,
+                                device="cpu", n_sample=25, width=200, height=200,
+                                vmin=0, vmax=1, shading=False)
 
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
                     plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(),
-                            batch_parts["T"][idx].squeeze(), losses=lossdict[idx])
+                            batch_parts["T"][idx].squeeze(), losses=lossdict[idx], cmin=0, cmax=2)
             else:
                 plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
-                        batch_parts["T"].squeeze(), losses=lossdict[0])
+                        batch_parts["T"].squeeze(), losses=lossdict[0], cmin=0, cmax=2)
 
 
             # Log the plotted imgs
@@ -475,9 +489,8 @@ class MyNet(pl.LightningModule):
                             [os.path.join(save_path, f"{key}_opttrans_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
 
                 if self.args.init == "tutte" and self.args.ninit == -1:
-                    images = [os.path.join(save_path, f"tutte_init_epoch_{self.current_epoch:05}.png")] + images
-
-                self.logger.log_image(key='opttrans uvs', images=images, step=self.current_epoch)
+                    images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
+                self.logger.log_image(key='3D losses', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
             # NOTE: mesh is original mesh topology (not soup)
@@ -488,34 +501,39 @@ class MyNet(pl.LightningModule):
                         edgecorrespondences = lossdict[0]['edgecorrespondences']
 
                         # fresnel mesh: ordered by fverts flatten
-                        # Edgekey to edge loss map
-                        edgekeys = list(sorted(edgecorrespondences.keys()))
-                        edgekeytoeloss = {edgekeys[i]: i for i in range(len(edgekeys))}
-                        vtoeloss = np.zeros(len(mesh.faces)*3)
-                        vtoecounts = np.ones(len(vtoeloss))
+                        # Set cylinders and cylinder colors based on original edge topologies
+                        ogvs = batch_parts["source_V"].detach().cpu().numpy()
+                        cylinderpos = []
+                        cylindervals = []
                         count = 0
                         for edgekey, v in sorted(edgecorrespondences.items()):
                             # If only one correspondence, then it is a boundary
                             if len(v) == 1:
                                 continue
                             eloss = val[count]
-                            vtoeloss[list(v[0])] += eloss
-                            vtoeloss[list(v[1])] += eloss
-                            vtoecounts[list(v[0])] += 1
-                            vtoecounts[list(v[1])] += 1
+                            cylinderpos.append(ogvs[list(edgekey)])
+                            cylindervals.append([eloss, eloss])
                             count += 1
-                        vtoeloss /= vtoecounts
+                        cylinderpos = np.stack(cylinderpos, axis=0)
+                        cylindervals = np.array(cylindervals)
 
                         # NOTE: can't let mesh re-export the faces because the indexing will be off
-                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
-                                    plotname=f"Sum {key}: {np.sum(vtoeloss):0.4f}",
-                                    vcolor_vals=vtoeloss, device="cpu", n_sample=25, width=200, height=200,
+                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                                    plotname=f"Sum {key}: {np.sum(val):0.4f}", cylinders=cylinderpos,
+                                    cylinder_scalars=cylindervals, outline_width=0.01,
+                                    device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=2, shading=False)
                     else:
                         export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Sum {key}: {np.sum(val):0.4f}",
                                     fcolor_vals=val, device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=0.6, shading=False)
+
+            # Log together: 3D surface losses + initial tutte cut
+            images = [os.path.join(save_path, f"{key}_mesh_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+            if self.args.init == "tutte" and self.args.ninit == -1:
+                images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
+            self.logger.log_image(key='opttrans cut', images=images, step=self.current_epoch)
 
             ## Poisson values
             # Check poisson UVs (true UV)
@@ -536,28 +554,16 @@ class MyNet(pl.LightningModule):
             if self.args.lossgradientstitching and self.args.opttrans:
                 # Convert edge cuts to vertex values (separate for each tri => in order of tris)
                 cutedges = batch_parts['cutEdges'] # Indices of cut edges
-                cutvs = []
+                cylinderpos = []
                 for eidx, e in sorted(mesh.topology.edges.items()):
                     if eidx in cutedges:
-                        cutvs.append(e.halfedge.vertex.index)
-                        cutvs.append(e.halfedge.twin.vertex.index)
-                cutvs = list(set(cutvs))
+                        cylinderpos.append(mesh.vertices[[e.halfedge.vertex.index, e.halfedge.twin.vertex.index]])
+                cylinderpos = np.stack(cylinderpos, axis=0)
 
-                vs, fs, es = mesh.export_soup()
-                # cutvs = np.unique(es[cutedges]) # Indices of cut vs
-                vcut_vals = []
-                for f in fs:
-                    for v in f:
-                        if v in cutvs:
-                            vcut_vals.append(1)
-                        else:
-                            vcut_vals.append(0)
-                vcut_vals = np.array(vcut_vals)
-
-                export_views(vs, fs, save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
+                export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
                             plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
-                            vcolor_vals= vcut_vals, device="cpu", n_sample=25, width=200, height=200,
-                            vmin=0, vmax=1, outline_width=0.005, shading=False)
+                            cylinders=cylinderpos, device="cpu", n_sample=25, width=200, height=200,
+                            vmin=0, vmax=1, outline_width=0.01, shading=False)
 
                 images = [os.path.join(save_path, f"stitch_mesh_{self.current_epoch:05}.png")]
                 self.logger.log_image(key='opttrans cut', images=images, step=self.current_epoch)
