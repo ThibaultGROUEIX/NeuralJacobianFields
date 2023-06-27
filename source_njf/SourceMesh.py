@@ -466,7 +466,7 @@ class SourceMesh:
                 isosoup = self.isofuv.reshape(-1, 2).detach().cpu().numpy() # V x 2
 
                 # Get Jacobians
-                self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1)
+                self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1) # F x 3 x 2
 
                 ## Debugging: make sure we can get back the original UVs up to global translation
                 pred_V = torch.einsum("abc,acd->abd", (fverts, self.isoj.transpose(2,1)))
