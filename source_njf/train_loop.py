@@ -684,8 +684,12 @@ class MyNet(pl.LightningModule):
             self.args.stitchlossweight = stitchweight
 
         # NOTE: pred_V should be F x 3 x 2
+        gtJ = None
+        if self.args.usegt:
+            gtJ = source.gtJ
+
         loss = self.lossfcn.computeloss(vertices, faces, pred_V, pred_J[:,:2,:sourcedim], initjacobs=initj,
-                                        seplossdelta=seplossdelta, transuv=None)
+                                        seplossdelta=seplossdelta, transuv=None, gtjacobians=gtJ)
         lossrecord = self.lossfcn.exportloss()
         self.lossfcn.clear() # This resets the loss record dictionary
 

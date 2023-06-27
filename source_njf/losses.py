@@ -52,6 +52,9 @@ class UVLoss:
 
         # Record loss names (for visualization)
         self.lossnames = []
+        if self.args.lossgt:
+            self.lossnames.append("gtloss")
+
         if self.args.lossdistortion:
             self.lossnames.append("distortionloss")
 
@@ -69,8 +72,14 @@ class UVLoss:
         self.count = 0
 
     def computeloss(self, vertices = None, faces = None, uv = None, jacobians = None, initjacobs=None, seplossdelta=0.1,
-                    transuv=None):
+                    transuv=None, gtjacobians=None):
         loss = 0
+        # Ground truth
+        if self.args.lossgt and gtjacobians is not None:
+            gtloss = torch.nn.functional.mse_loss(jacobians, gtjacobians, reduction='none')
+            loss += torch.mean(gtloss)
+            self.currentloss[self.count]['gtloss'] = gtloss.detach().item()
+
         # Autocuts
         if self.args.lossautocut:
             acloss = autocuts(vertices, faces, jacobians, uv, self.args.seplossweight, seplossdelta)

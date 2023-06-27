@@ -107,6 +107,7 @@ def get_arg_parser():
 	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet', 'edge'})
 	parser.add_argument("--losscount", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--lossgradientstitching", choices={'cosine', 'split'}, help = "use gradient stitching loss", default=None)
+	parser.add_argument("--lossgt", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
 
 	parser.add_argument("--stitchlossweight", help="weight for edge stitching losses", default=1, type=float)
