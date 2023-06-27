@@ -843,7 +843,7 @@ def cut_to_disk_single(mesh, singular_vs, verbose=False):
             print(f"Mesh became non-manifold from cuts!")
             break
 
-def SLIM(mesh, v_with_holes = None, f_with_holes = None):
+def SLIM(mesh, iters=500, v_with_holes = None, f_with_holes = None):
     # SLIM parameterization
     # Initialize using Tutte embedding
     import igl
@@ -862,7 +862,7 @@ def SLIM(mesh, v_with_holes = None, f_with_holes = None):
         vs, fs, _ = submesh.export_soup()
 
     slim = igl.SLIM(vs, fs, uv_init, np.ones((1,1)),np.expand_dims(uv_init[0,:],0), igl.SLIM_ENERGY_TYPE_SYMMETRIC_DIRICHLET, 1.0e1)
-    slim.solve(500)
+    slim.solve(iters)
     slim_uv = slim.vertices()
     slim_uv -= slim_uv.mean(axis = 0)
     return slim_uv, slim.energy()

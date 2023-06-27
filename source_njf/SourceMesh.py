@@ -148,7 +148,7 @@ class SourceMesh:
                 self.tuttej = torch.load(os.path.join(self.source_dir, "tuttej.pt"))
                 self.tuttetranslate = torch.load(os.path.join(self.source_dir, "tuttetranslate.pt"))
             else:
-                from utils import tutte_embedding, get_local_tris
+                from utils import tutte_embedding, get_local_tris, generate_random_cuts
 
                 vertices = self.source_vertices
                 device = vertices.device
@@ -162,173 +162,7 @@ class SourceMesh:
                 if new_init:
                     rng = default_rng()
                     n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
-
-                    prev_edge = None
-                    prev_source = None
-                    cutvs = []
-                    for i in range(n_cuts):
-                        if prev_edge is None:
-                            edgei = np.random.randint(0, len(mesh.topology.edges))
-                            edge = mesh.topology.edges[edgei]
-                            splitf = edge.halfedge.face.index
-                            # If sampled boundary edge, or both edge endpoints on same boundary, then keep resampling
-
-                            notvalid = edge.onBoundary()
-                            if edge.halfedge.vertex.onBoundary() and edge.halfedge.twin.vertex.onBoundary():
-                                v1bd = None
-                                for he in edge.halfedge.vertex.adjacentHalfedges():
-                                    if he.onBoundary:
-                                        v1bd = he.face
-                                        break
-                                v2bd = None
-                                for he in edge.halfedge.twin.vertex.adjacentHalfedges():
-                                    if he.onBoundary:
-                                        v2bd = he.face
-                                        break
-                                if v1bd is None or v2bd is None:
-                                    raise ValueError("Boundary topology is bugged! Vertices on boundary but no halfedge boundary found.")
-                                if v1bd == v2bd:
-                                    notvalid = True
-                            while notvalid:
-                                edgei = np.random.randint(0, len(mesh.topology.edges))
-                                edge = mesh.topology.edges[edgei]
-                                splitf = edge.halfedge.face.index
-
-                                notvalid = edge.onBoundary()
-                                if edge.halfedge.vertex.onBoundary() and edge.halfedge.twin.vertex.onBoundary():
-                                    v1bd = None
-                                    for he in edge.halfedge.vertex.adjacentHalfedges():
-                                        if he.onBoundary:
-                                            v1bd = he.face
-                                            break
-                                    v2bd = None
-                                    for he in edge.halfedge.twin.vertex.adjacentHalfedges():
-                                        if he.onBoundary:
-                                            v2bd = he.face
-                                            break
-                                    if v1bd is None or v2bd is None:
-                                        raise ValueError("Boundary topology is bugged! Vertices on boundary but no halfedge boundary found.")
-                                    if v1bd == v2bd:
-                                        notvalid = True
-
-                            # If vertex is starting on boundary, then this is simple cut case
-                            if edge.halfedge.vertex.onBoundary() or edge.halfedge.twin.vertex.onBoundary():
-                                sourcev = edge.halfedge.vertex.index if edge.halfedge.vertex.onBoundary() else edge.halfedge.twin.vertex.index
-                                targetv = edge.halfedge.vertex.index if edge.halfedge.twin.vertex.onBoundary() else edge.halfedge.twin.vertex.index
-
-                                cut_vs = [mesh.vertices[sourcev], mesh.vertices[targetv]]
-                                cutvs.extend(cut_vs)
-
-                                # Visualize the cuts
-                                # ps.remove_all_structures()
-                                # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
-                                # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
-                                # currentcut = np.array(cutvs)
-                                # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
-                                # ps.show()
-
-                                EdgeCut(mesh, edgei, sourcev, splitf).apply()
-                            else:
-                                # Need to sample a second edge (not on boundary)
-                                e2_candidates = [e.index for e in edge.halfedge.vertex.adjacentEdges() if not e.onBoundary() and e != edge] + \
-                                            [e.index for e in edge.halfedge.twin.vertex.adjacentEdges() if not e.onBoundary() and e != edge]
-                                if len(e2_candidates) == 0:
-                                    break
-                                    # raise ValueError("All candidate second edges are on boundary.")
-                                else:
-                                    e2_i = np.random.choice(e2_candidates)
-
-                                # Sourcev is shared vertex between the two edges
-                                presourcev = edge.halfedge.twin.vertex
-                                sourcev = edge.halfedge.vertex
-                                otheredge = mesh.topology.edges[e2_i]
-                                targetv = otheredge.halfedge.vertex
-                                if sourcev not in mesh.topology.edges[e2_i].two_vertices():
-                                    sourcev = edge.halfedge.twin.vertex
-                                    presourcev = edge.halfedge.vertex
-                                if targetv in edge.two_vertices():
-                                    targetv = otheredge.halfedge.twin.vertex
-                                assert sourcev in mesh.topology.edges[e2_i].two_vertices()
-                                assert presourcev not in mesh.topology.edges[e2_i].two_vertices()
-                                assert targetv not in edge.two_vertices()
-                                sourcev = sourcev.index
-                                targetv = targetv.index
-                                presourcev = presourcev.index
-
-                                cut_vs = [mesh.vertices[presourcev], mesh.vertices[sourcev], mesh.vertices[targetv]]
-                                cutvs.extend(cut_vs)
-
-                                # Visualize the cuts
-                                # ps.remove_all_structures()
-                                # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
-                                # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
-                                # currentcut = np.array(cutvs)
-                                # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
-                                # ps.show()
-
-                                # Actual edge should be second edge
-                                edge = mesh.topology.edges[e2_i]
-
-                                EdgeCut(mesh, edgei, sourcev, splitf, cutbdry=True, e2_i=e2_i).apply()
-                        else:
-                            # Sample edge adjacent to previous edge
-                            prev_target = prev_edge.halfedge.vertex if prev_edge.halfedge.vertex.index != prev_source else prev_edge.halfedge.twin.vertex
-
-                            # Visualize target
-                            # ps_target = ps.register_curve_network("targetv", mesh.vertices[[prev_target.index]], np.array([[0,0]]), enabled=True)
-                            # ps_prev_source = ps.register_curve_network("prevsource", mesh.vertices[[prev_source]], np.array([[0,0]]), enabled=True)
-                            # ps.show()
-
-                            ecandidates = [e.index for e in prev_target.adjacentEdges() if not e.onBoundary()] + \
-                                            [e.index for e in prev_target.adjacentEdges() if not e.onBoundary()]
-
-                            # Filter out all edges which have vertex on same boundary as previous edge
-                            assert prev_edge.onBoundary()
-                            prevboundary = prev_edge.halfedge.face if prev_edge.halfedge.onBoundary else prev_edge.halfedge.twin.face
-                            keepi = []
-                            for ei in ecandidates:
-                                edge = mesh.topology.edges[ei]
-                                vertex = edge.halfedge.vertex if edge.halfedge.vertex not in prev_edge.two_vertices() else edge.halfedge.twin.vertex
-
-                                # If vertex boundary is same as previous boundary, then we skip the incident edge
-                                if vertex.onBoundary():
-                                    for he in vertex.adjacentHalfedges():
-                                        if he.onBoundary:
-                                            break
-                                    if he.face != prevboundary:
-                                        keepi.append(ei)
-                                else:
-                                    keepi.append(ei)
-                            ecandidates = keepi
-
-                            if len(ecandidates) == 0:
-                                break
-                                # raise ValueError("All candidate second edges would cause mesh to be disconnected.")
-                            else:
-                                edgei = np.random.choice(ecandidates)
-                                edge = mesh.topology.edges[edgei]
-                                sourcev = edge.halfedge.vertex if edge.halfedge.vertex in prev_edge.two_vertices() else edge.halfedge.twin.vertex
-                                assert sourcev == prev_target
-
-                                sourcev = sourcev.index
-                                splitf = edge.halfedge.face.index
-
-                                targetv = edge.halfedge.twin.vertex.index if sourcev == edge.halfedge.vertex.index else edge.halfedge.vertex.index
-                                cut_vs = [mesh.vertices[targetv]]
-                                cutvs.extend(cut_vs)
-
-                                # Visualize the cuts
-                                # ps.remove_all_structures()
-                                # ps_mesh = ps.register_surface_mesh("mesh", soup.vertices, soup.indices)
-                                # cutes = np.array([[i, i+1] for i in range(0, len(cutvs)-1)])
-                                # currentcut = np.array(cutvs)
-                                # ps_curve = ps.register_curve_network("cut", currentcut, cutes, enabled=True)
-                                # ps.show()
-
-                                EdgeCut(mesh, edgei, sourcev, splitf, cutbdry=True).apply()
-
-                        prev_edge = edge
-                        prev_source = sourcev
+                    cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
 
                     # Unit test: mesh is still connected
                     vs, fs, es = mesh.export_soup()
@@ -363,7 +197,7 @@ class SourceMesh:
                             set_new_tutte = True
                     # Otherwise, just use the default Tutte
                     if not set_new_tutte:
-                        self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x F x 2
+                        self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x V x 2
 
                         # Convert Tutte to 3-dim
                         self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
@@ -375,7 +209,7 @@ class SourceMesh:
                         self.cutvs = vertices.detach().cpu().numpy()
                         self.cutfs = faces.detach().numpy()
                 else:
-                    self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x F x 2
+                    self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x V x 2
 
                     # Convert Tutte to 3-dim
                     self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
@@ -434,6 +268,128 @@ class SourceMesh:
             # plt.savefig(f"scratch/{self.source_ind}.png")
             # plt.close(fig)
             # plt.cla()
+        elif self.init == "slim":
+            if os.path.exists(os.path.join(self.source_dir, "slimfuv.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "slimuv.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "slimj.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "slimtranslate.pt")) and \
+                    not new_init:
+                self.slimfuv = torch.load(os.path.join(self.source_dir, "slimfuv.pt"))
+                self.slimuv = torch.load(os.path.join(self.source_dir, "slimuv.pt"))
+                self.slimj = torch.load(os.path.join(self.source_dir, "slimj.pt"))
+                self.slimtranslate = torch.load(os.path.join(self.source_dir, "slimtranslate.pt"))
+            else:
+                from utils import SLIM, get_local_tris, generate_random_cuts
+
+                vertices = self.source_vertices
+                device = vertices.device
+                faces = self.get_source_triangles()
+                mesh = Mesh(vertices.detach().cpu().numpy(), faces)
+                ogvs, ogfs, oges = mesh.export_soup()
+                ogmesh = Mesh(ogvs, ogfs)
+
+                vertices = torch.from_numpy(ogvs).to(device)
+                faces = torch.from_numpy(ogfs).long().to(device)
+                fverts = vertices[faces]
+
+                if new_init:
+                    rng = default_rng()
+                    n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
+                    cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
+
+                    # Unit test: mesh is still connected
+                    vs, fs, es = mesh.export_soup()
+                    testsoup = PolygonSoup(vs, fs)
+                    n_components = testsoup.nConnectedComponents()
+                    assert n_components == 1, f"After cutting found {n_components} components!"
+
+                    # Save new topology
+                    self.cutvs = vs
+                    self.cutfs = fs
+
+                    # Only replace SLIM if nan
+                    newslim = torch.from_numpy(SLIM(mesh, iters=self.args.slimiters)[0]).unsqueeze(0) # 1 x V x 2
+                    set_new_slim = False
+                    if torch.all(~torch.isnan(newslim)):
+                        self.slimuv = newslim
+
+                        # Convert slim to 3-dim
+                        self.slimuv = torch.cat([self.slimuv, torch.zeros(self.slimuv.shape[0], self.slimuv.shape[1], 1)], dim=-1)
+
+                        # Get Jacobians
+                        meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(vs, fs, self.source_dir, self._SourceMesh__ttype, cpuonly=self.cpuonly, load_wks_samples=self._SourceMesh__use_wks, load_wks_centroids=self._SourceMesh__use_wks)
+                        meshprocessor.prepare_temporary_differential_operators(self._SourceMesh__ttype)
+                        poissonsolver = meshprocessor.diff_ops.poisson_solver
+
+                        # NOTE: We sometimes have NaNs here!!
+                        self.slimj = poissonsolver.jacobians_from_vertices(self.slimuv) # F x 3 x 3
+
+                        if torch.any(~torch.isfinite(self.slimj)):
+                            print("SLIM Jacobians have NaNs!")
+                        else:
+                            set_new_slim = True
+                    # Otherwise, just use SLIM with no cutting
+                    if not set_new_slim:
+                        self.slimuv = torch.from_numpy(SLIM(ogmesh, iters=self.args.slimiters)[0]).unsqueeze(0) # 1 x V x 2
+
+                        # Convert slim to 3-dim
+                        self.slimuv = torch.cat([self.slimuv, torch.zeros(self.slimuv.shape[0], self.slimuv.shape[1], 1)], dim=-1)
+
+                        # Get Jacobians
+                        self.slimj = self.jacobians_from_vertices(self.slimuv) #  F x 3 x 3
+
+                        # Reset cut topo to original topo
+                        self.cutvs = vertices.detach().cpu().numpy()
+                        self.cutfs = faces.detach().numpy()
+                else:
+                    self.slimuv = torch.from_numpy(SLIM(ogmesh, iters=self.args.slimiters)[0]).unsqueeze(0) # 1 x V x 2
+
+                    # Convert slim to 3-dim
+                    self.slimuv = torch.cat([self.slimuv, torch.zeros(self.slimuv.shape[0], self.slimuv.shape[1], 1)], dim=-1)
+
+                    # Get Jacobians
+                    self.slimj = self.jacobians_from_vertices(self.slimuv) #  F x 3 x 3
+
+                    # Reset cut topo to original topo
+                    self.cutvs = vertices.detach().cpu().numpy()
+                    self.cutfs = faces.detach().numpy()
+
+                # DEBUG: make sure we can get back the original UVs up to global translation
+                # NOTE: We compare triangle centroids bc face indexing gets messed up after cutting
+                fverts = torch.from_numpy(ogvs[ogfs])
+                # pred_V = torch.einsum("abc,acd->abd", (self.slimj[0,:,:2,:], fverts)).transpose(1,2)
+                pred_V = torch.einsum("abc,acd->abd", (fverts, self.slimj[0,:,:2,:].transpose(2,1)))
+
+                if new_init and self.init == "slim" and set_new_slim:
+                    checkslim = self.slimuv[0,fs,:2]
+                    self.slimfuv = self.slimuv[:,fs,:2] # B x F x 3 x 2
+                else:
+                    checkslim = self.slimuv[0,faces,:2]
+                    self.slimfuv = self.slimuv[:,faces,:2] # B x F x 3 x 2
+
+                # diff = pred_V - checkslim
+                # diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
+                # torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+
+                ## Save the global translations
+                self.slimtranslate = (checkslim - pred_V)[:,:,:2]
+
+                # Cache everything
+                torch.save(self.slimfuv, os.path.join(self.source_dir, "slimfuv.pt"))
+                torch.save(self.slimuv, os.path.join(self.source_dir, "slimuv.pt"))
+                torch.save(self.slimj, os.path.join(self.source_dir, "slimj.pt"))
+                torch.save(self.slimtranslate, os.path.join(self.source_dir, "slimtranslate.pt"))
+
+            ## Store in loaded data so it gets mapped to device
+            # Remove extraneous dimension
+            self.__loaded_data['slimfuv'] = self.slimfuv
+            self.__loaded_data['slimuv'] = self.slimuv
+            self.__loaded_data['slimj'] = self.slimj
+            self.__loaded_data['slimtranslate'] = self.slimtranslate
+
+            if self.initjinput:
+                self.centroids_and_normals = torch.cat([self.centroids_and_normals, self.slimj.reshape(len(self.centroids_and_normals), -1)], dim=1)
+
         elif self.init == "isometric":
             if os.path.exists(os.path.join(self.source_dir, "isofuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "isoj.pt")) and \
@@ -562,6 +518,8 @@ class SourceMesh:
                 self.flat_vector = self.tuttej.reshape(1, -1)
             elif self.init == "isometric":
                 self.flat_vector = torch.cat([self.isoj, torch.zeros((self.isoj.shape[0], 1, 3))], dim=1).reshape(1, -1)
+            elif self.init == "slim":
+                self.flat_vector = self.slimj.reshape(1, -1)
             # nchannels = self.centroids_and_normals.shape[1]
             # gsize = int(np.ceil(nchannels/9))
             # newchannels = []

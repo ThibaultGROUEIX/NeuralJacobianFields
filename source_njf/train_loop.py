@@ -438,12 +438,12 @@ class MyNet(pl.LightningModule):
         if self.args.xp_type == "uv":
             # NOTE: batch_parts['T'] = triangle soup indexing if no poisson solve
             # If recutting Tutte: then plot the original tutte uvs
-            if self.args.init == "tutte" and self.args.ninit == -1:
+            if self.args.init in ["tutte", 'slim'] and self.args.ninit == -1:
                 source = batch[0]
-                tutteuv = source.tutteuv
-                tuttefaces = source.cutfs
-                plot_uv(save_path, f"tutte init epoch {self.current_epoch:05}", tutteuv.squeeze().detach().cpu().numpy(),
-                            tuttefaces, losses=None)
+                uv = source.tutteuv if self.args.init == 'tutte' else source.slimuv
+                cutfs = source.cutfs
+                plot_uv(save_path, f"{self.args.init} init epoch {self.current_epoch:05}", uv.squeeze().detach().cpu().numpy(),
+                            cutfs, losses=None)
 
                 # Also plot the full boundary
                 initfaces = batch_parts["ogT"]
@@ -475,8 +475,8 @@ class MyNet(pl.LightningModule):
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
                         [os.path.join(save_path, f"{key}_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
 
-            if self.args.init == "tutte" and self.args.ninit == -1:
-                images = [os.path.join(save_path, f"tutte_init_epoch_{self.current_epoch:05}.png")] + images
+            if self.args.init in ['tutte', 'slim'] and self.args.ninit == -1:
+                images = [os.path.join(save_path, f"{self.args.init}_init_epoch_{self.current_epoch:05}.png")] + images
 
             self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
 
@@ -488,8 +488,9 @@ class MyNet(pl.LightningModule):
                 images = [os.path.join(save_path, f"opttrans_epoch_{self.current_epoch:05}.png")] + \
                             [os.path.join(save_path, f"{key}_opttrans_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
 
-                if self.args.init == "tutte" and self.args.ninit == -1:
+                if self.args.init in ["tutte", 'slim'] and self.args.ninit == -1:
                     images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
+
                 self.logger.log_image(key='3D losses', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
@@ -531,8 +532,9 @@ class MyNet(pl.LightningModule):
 
             # Log together: 3D surface losses + initial tutte cut
             images = [os.path.join(save_path, f"{key}_mesh_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
-            if self.args.init == "tutte" and self.args.ninit == -1:
+            if self.args.init in ["tutte", "slim"] and self.args.ninit == -1:
                 images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
+
             self.logger.log_image(key='opttrans cut', images=images, step=self.current_epoch)
 
             ## Poisson values
@@ -558,7 +560,10 @@ class MyNet(pl.LightningModule):
                 for eidx, e in sorted(mesh.topology.edges.items()):
                     if eidx in cutedges:
                         cylinderpos.append(mesh.vertices[[e.halfedge.vertex.index, e.halfedge.twin.vertex.index]])
-                cylinderpos = np.stack(cylinderpos, axis=0)
+                if len(cylinderpos) > 0:
+                    cylinderpos = np.stack(cylinderpos, axis=0)
+                else:
+                    cylinderpos = None
 
                 export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
                             plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
@@ -590,18 +595,21 @@ class MyNet(pl.LightningModule):
             sourcedim = 2
             initj = None # NOTE: this is guaranteed to be isometric, so don't need to composite for computing distortion
             initfuv = source.isofuv.squeeze().to(self.device)
+        elif self.args.init == "slim":
+            initj = source.slimj.squeeze().to(self.device)
+            initfuv = source.slimfuv.squeeze().to(self.device)
 
-        # Debugging: tutte fuvs make sense
-        if self.args.debug and self.args.init:
-            import matplotlib.pyplot as plt
-            fig, axs = plt.subplots(figsize=(6, 4))
-            checkinit = initfuv.reshape(-1, 2).detach().cpu().numpy()
-            checktris = np.arange(len(checkinit)).reshape(-1, 3)
-            axs.triplot(checkinit[:,0], checkinit[:,1], checktris, linewidth=0.5)
-            plt.axis('off')
-            plt.savefig(f"scratch/{source.source_ind}_fuv.png")
-            plt.close(fig)
-            plt.cla()
+        # Debugging: fuvs make sense
+        # if self.args.debug and self.args.init:
+        #     import matplotlib.pyplot as plt
+        #     fig, axs = plt.subplots(figsize=(6, 4))
+        #     checkinit = initfuv.reshape(-1, 2).detach().cpu().numpy()
+        #     checktris = np.arange(len(checkinit)).reshape(-1, 3)
+        #     axs.triplot(checkinit[:,0], checkinit[:,1], checktris, linewidth=0.5)
+        #     plt.axis('off')
+        #     plt.savefig(f"scratch/{source.source_ind}_fuv.png")
+        #     plt.close(fig)
+        #     plt.cla()
 
         # Need to export mesh soup to get correct face to tutte uv indexing
         mesh = Mesh(source.get_vertices().detach().cpu().numpy(), source.get_source_triangles())
