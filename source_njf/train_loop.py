@@ -534,8 +534,7 @@ class MyNet(pl.LightningModule):
             images = [os.path.join(save_path, f"{key}_mesh_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
             if self.args.init in ["tutte", "slim"] and self.args.ninit == -1:
                 images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
-
-            self.logger.log_image(key='opttrans cut', images=images, step=self.current_epoch)
+            self.logger.log_image(key='3D losses', images=images, step=self.current_epoch)
 
             ## Poisson values
             # Check poisson UVs (true UV)
