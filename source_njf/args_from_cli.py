@@ -62,6 +62,8 @@ def get_arg_parser():
 	parser.add_argument("--basistype", choices={"basis", "rot", "global"}, help="how to sample new triangle local basis", default="basis", type=str)
 	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
 							action="store_true")
+	parser.add_argument("--noiseiso", help="noise the isometric embedding",
+							action="store_true")
 	parser.add_argument("--min_cuts", type=int, help="minimum # cuts for tutte init", default=5)
 	parser.add_argument("--max_cuts", type=int, help="maximum # cuts for tutte init", default=15)
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
@@ -106,7 +108,7 @@ def get_arg_parser():
 	###### LOSSES ######
 	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet', 'edge'})
 	parser.add_argument("--losscount", help = "use counting loss over distortion energy", action="store_true")
-	parser.add_argument("--lossgradientstitching", choices={'cosine', 'split'}, help = "use gradient stitching loss", default=None)
+	parser.add_argument("--lossgradientstitching", choices={'cosine', 'split', 'l2', 'l1'}, help = "use gradient stitching loss", default=None)
 	parser.add_argument("--lossgt", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
 

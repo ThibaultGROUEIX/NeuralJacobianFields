@@ -646,7 +646,7 @@ def _predicted_jacobians_to_vertices_via_poisson_solve(Lap, rhs, jacobians):
     input_to_solve = _multiply_sparse_2d_by_dense_3d(rhs, P)
 
 
-    out = SPLUSolveLayer.apply(Lap, input_to_solve)
+    out = SPLUSolveLayer.apply(Lap, input_to_solve) # B x V x 2
 
     # NOTE: THIS PINS THE FIRST VERTEX TO ORIGIN
     # out = torch.cat([torch.zeros(out.shape[0], 1, out.shape[2]).type_as(out), out], dim=1) # B x V x 2

@@ -78,7 +78,7 @@ class UVLoss:
         if self.args.lossgt and gtjacobians is not None:
             gtloss = torch.nn.functional.mse_loss(jacobians, gtjacobians, reduction='none')
             loss += torch.mean(gtloss)
-            self.currentloss[self.count]['gtloss'] = gtloss.detach().item()
+            self.currentloss[self.count]['gtloss'] = torch.mean(gtloss, dim=[1,2]).detach().cpu().numpy()
 
         # Autocuts
         if self.args.lossautocut:
@@ -114,7 +114,10 @@ class UVLoss:
                 loss += torch.mean(distortionenergy)
 
         if self.args.lossedgeseparation:
-            edgeseploss = torch.sum(uvseparation(vertices, faces, uv, loss= self.args.eseploss), dim=[1,2])
+            edgeseploss, edgecorrespondences = uvseparation(vertices, faces, uv, loss= self.args.eseploss)
+            edgeseploss = torch.mean(torch.sum(edgeseploss, dim=2), dim=1)
+            self.currentloss[self.count]['edgecorrespondences'] = edgecorrespondences
+
             # Relaxation
             if self.args.stitchrelax:
                 edgeseploss = (edgeseploss * edgeseploss)/(edgeseploss * edgeseploss + seplossdelta)
@@ -122,8 +125,12 @@ class UVLoss:
             self.currentloss[self.count]['edgeseploss'] = edgeseploss.detach().cpu().numpy()
 
         if self.args.lossgradientstitching:
-            if self.args.lossgradientstitching == "cosine":
-                edgegradloss, edgecorrespondences = uvgradloss(faces, uv, return_edge_correspondence=True)
+            if self.args.lossgradientstitching != 'split':
+                edgegradloss, edgecorrespondences = uvgradloss(faces, uv, return_edge_correspondence=True, loss=self.args.lossgradientstitching)
+
+                if self.args.lossgradientstitching in ['l1', 'l2']:
+                    edgegradloss = torch.sum(edgegradloss, dim=1)
+
                 self.currentloss[self.count]['edgecorrespondences'] = edgecorrespondences
             elif self.args.lossgradientstitching == "split":
                 edgegradloss = splitgradloss(vertices, faces, uv, cosine_weight=1, mag_weight=1)
@@ -242,19 +249,24 @@ def uvseparation(vs, fs, uv, loss='l1'):
     """ uv: F x 3 x 2
         vs: V x 3 (original topology)
         fs: F x 3 (original topology) """
-
-    # TODO: Can pre-compute ALL of the mesh-related operations
+    from source_njf.utils import edge_soup_correspondences
     from meshing import Mesh
-    # NOTE: Mesh data structure doesn't respect original face ordering
-    # so we have to use custom edge-face connectivity export function
-    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
-    fconn, vconn = mesh.topology.export_edge_face_connectivity(mesh.faces) # NOTE: Removes boundaries
-    fconn = np.array(fconn, dtype=int) # E x {f0, f1}
-    vconn = np.array(vconn, dtype=int) # E x {v0,v1}
-    ef0 = uv[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
-    ef1 = uv[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
+    uvsoup = uv.reshape(-1, 2)
+    edgecorrespondences, facecorrespondences = edge_soup_correspondences(fs.detach().cpu().numpy())
+    e1 = []
+    e2 = []
+    for k, v in sorted(edgecorrespondences.items()):
+        # If only one correspondence, then it is a boundary
+        if len(v) == 1:
+            continue
+        e1.append(uvsoup[list(v[0])])
+        e2.append(uvsoup[list(v[1])])
+
+    ef0 = torch.stack(e1) # E*2 x 2
+    ef1 = torch.stack(e2) # E*2 x 2
 
     # Weight each loss by length of 3D edge
+    mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
     elens = []
     for i, edge in sorted(mesh.topology.edges.items()):
         if edge.onBoundary():
@@ -267,9 +279,9 @@ def uvseparation(vs, fs, uv, loss='l1'):
     elif loss == 'l2':
         separation = elens * torch.nn.functional.mse_loss(ef0, ef1, reduction='none')
 
-    return separation
+    return separation, edgecorrespondences
 
-def uvgradloss(fs, uv, return_edge_correspondence=False):
+def uvgradloss(fs, uv, return_edge_correspondence=False, loss='l2'):
     """ uv: F x 3 x 2
         vs: V x 3 (original topology)
         fs: F x 3 (original topology) """
@@ -283,7 +295,7 @@ def uvgradloss(fs, uv, return_edge_correspondence=False):
     # vconn = np.array(vconn, dtype=int) # E x {v0,v0'} x {v1, v1'}
 
     uvsoup = uv.reshape(-1, 2)
-    edgecorrespondences = edge_soup_correspondences(fs.detach().cpu().numpy())
+    edgecorrespondences, facecorrespondences = edge_soup_correspondences(fs.detach().cpu().numpy())
     e1 = []
     e2 = []
     for k, v in sorted(edgecorrespondences.items()):
@@ -316,21 +328,25 @@ def uvgradloss(fs, uv, return_edge_correspondence=False):
     e0 = ef0[::2] - ef0[1::2] # E x 2
     e1 = ef1[::2] - ef1[1::2] # E x 2
 
-    # Cosine similarity
-    separation = 1 - torch.nn.functional.cosine_similarity(e0, e1, eps=1e-8)
-
     # Weight each loss by length of 3D edge
+    # from meshing.mesh import Mesh
+    # mesh = Mesh(vs.detach().cpu().numpy(), fs.detach().cpu().numpy())
     # elens = []
     # for i, edge in sorted(mesh.topology.edges.items()):
     #     if edge.onBoundary():
     #         continue
     #     elens.append(mesh.length(edge))
     # elens = torch.tensor(elens, device=uv.device).reshape(len(elens), 1)
+    # elens /= torch.max(elens)
 
-    # if loss == "l1":
-    #     separation = torch.nn.functional.l1_loss(e0, e1, reduction='none')
-    # elif loss == 'l2':
-    #     separation = torch.nn.functional.mse_loss(e0, e1, reduction='none')
+    if loss == "l1":
+        separation = torch.nn.functional.l1_loss(e0, e1, reduction='none')
+    elif loss == 'l2':
+        separation = torch.nn.functional.mse_loss(e0, e1, reduction='none')
+    elif loss == 'cosine':
+        # Cosine similarity
+        separation = 1 - torch.nn.functional.cosine_similarity(e0, e1, eps=1e-8)
+
     if return_edge_correspondence:
         return separation, edgecorrespondences
 

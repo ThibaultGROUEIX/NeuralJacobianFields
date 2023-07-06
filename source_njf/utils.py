@@ -347,32 +347,40 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
         returns: F x 2 numpy array with optimized translations per triangle"""
     # TODO: Update the edge correspondence code to take just the faces array and call edge_soup_correspondence!
     from meshing.mesh import Mesh
-    from meshing.analysis import computeFacetoEdges
-
-    # Build A, B matrices using the edge connectivity
+    edgecorrespondences, facecorrespondences = edge_soup_correspondences(faces)
     mesh = Mesh(vertices, faces)
-    computeFacetoEdges(mesh)
 
-    fconn, vconn = mesh.topology.export_edge_face_connectivity(faces)
-    fconn = np.array(fconn, dtype=int) # E x {f0, f1}
-    vconn = np.array(vconn, dtype=int) # E x [[v0_1,v1_1], [v0_2, v1_2]]
+    uvsoup = trisoup.reshape(-1, 2)
+    e1 = []
+    e2 = []
+    fconn = []
+    nonbcount = 0
+    for eidx, edge in sorted(mesh.topology.edges.items()):
+        vkey = tuple(sorted([edge.halfedge.vertex.index, edge.halfedge.tip_vertex().index]))
+        assert vkey in edgecorrespondences, f"Edge {vkey} not found in edgecorrespondences!"
+        v = edgecorrespondences[vkey]
 
-    A = np.zeros((len(fconn) * 2, len(faces)))
+        if not edge.onBoundary():
+            nonbcount += 1
+
+        if len(v) > 1:
+            v = edgecorrespondences[vkey]
+            e1.extend(list(v[0]))
+            e2.extend(list(v[1]))
+            fconn.append(facecorrespondences[vkey])
+
+    assert len(e1) == len(e2) == nonbcount * 2, f"Edge idx arrays should be twice the number of non-boundary edges! {len(e1)}  == {len(e2)} == {nonbcount}"
+    ef0 = uvsoup[e1] # E*2 x 2
+    ef1 = uvsoup[e2] # E*2 x 2
+    fconn = np.array(fconn)
+
+    A = np.zeros((len(ef0), len(faces)))
 
     # Duplicate every row of fconn (bc each edge involves two vertex pairs)
     edge_finds = np.repeat(fconn, 2, axis=0)
     A[np.arange(len(A)),edge_finds[:,0]] = 1 # distance vectors go f0 -> f1
     A[np.arange(len(A)),edge_finds[:,1]] = -1
-
-    ef0 = trisoup[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
-    ef1 = trisoup[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
-
-    B = (ef1 - ef0).reshape(2 * len(fconn), 2)
-
-    if debug:
-        import polyscope as ps
-        ps.init()
-        ps_soup = ps.register_surface_mesh("initial soup", trisoup.reshape(-1, 2), np.arange(len(faces) * 3).reshape(-1, 3), edge_width=1)
+    B = ef1 - ef0
 
     newsoup = np.copy(trisoup)
     if iterate:
@@ -418,9 +426,10 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
             #     ps.show()
 
             # Recompute edge distances and associated weights
-            ef0 = newsoup[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
-            ef1 = newsoup[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
-            B = (ef1 - ef0).reshape(2 * len(fconn), 2) # E * 2 x 2
+            newuvsoup = newsoup.reshape(-1, 2)
+            ef0 = newuvsoup[e1] # E*2 x 2
+            ef1 = newuvsoup[e2] # E*2 x 2
+            B = ef1 - ef0 # E * 2 x 2
 
             # Weights are 1/(correspondence distances)
             weights = 1/(np.linalg.norm(B, axis=1, keepdims=1) + 1e-10)
@@ -449,16 +458,15 @@ def leastSquaresTranslation(vertices, faces, trisoup, iterate=False, debug=False
         opttrans, residuals, rank, s = np.linalg.lstsq(A, B, rcond=None)
         finaltrans = opttrans.reshape(-1, 1, 2)
 
-    if debug:
-        ps_soup = ps.register_surface_mesh("final soup", newsoup.reshape(-1, 2), np.arange(len(faces) * 3).reshape(-1, 3), edge_width=1, enabled=True)
-        ps.show()
-
+    ## Return cutE x 2 x 3 array where each row is the vertex positions of the cut
     if return_cuts:
         cutlen = 0
         cutedges = []
-        finalsoup = trisoup + finaltrans
-        ef0 = finalsoup[fconn[:,[0]], vconn[:,0]] # E x 2 x 2
-        ef1 = finalsoup[fconn[:,[1]], vconn[:,1]] # E x 2 x 2
+        finalsoup = (trisoup + finaltrans).reshape(-1, 2)
+        e1 = np.array(e1).reshape(-1, 2)
+        e2 = np.array(e2).reshape(-1, 2)
+        ef0 = finalsoup[e1] # E x 2 x 2
+        ef1 = finalsoup[e2] # E x 2 x 2
         edge_delta = np.sum(np.linalg.norm(ef1 - ef0, axis=-1), axis=1) # E x 1
         bdrycount = 0
         for eidx, edge in sorted(mesh.topology.edges.items()):
@@ -498,6 +506,9 @@ def polyscope_edge_perm(mesh):
     return np.array(edge_p)
 
 # ====================== UV Stuff ========================
+def new_topology_from_cuts(mesh, edgelist):
+    """ Given unsorted list of edges to cut, sort the cuts by connections and make cuts """
+
 def make_cut(mesh, cutlist):
     from meshing.edit import EdgeCut
 
@@ -984,6 +995,7 @@ def get_jacobian(vs, fs, uvmap):
 def edge_soup_correspondences(fs):
     from collections import defaultdict
     edgecorrespondences = defaultdict(list) # {v1, v2} (original topology) => [(v1a, v2a), (v1b, v2b)] (soup vertices indexing F*3 x 3)
+    facecorrespondences = defaultdict(list) # {v1, v2} (original topology) => [f1, f2] (soup faces corresponding with edge corrs)
     for fi in range(len(fs)):
         f = fs[fi]
         for i in range(3):
@@ -1007,7 +1019,14 @@ def edge_soup_correspondences(fs):
             # Find the corresponding index in the tutte vertex soup
             currentlist.append(soupkey)
 
-    return edgecorrespondences
+            currentlist = facecorrespondences[edgekey]
+            if len(currentlist) == 2:
+                raise ValueError("There should only be two face correspondences per edge!")
+
+            # Find the corresponding index in the tutte vertex soup
+            currentlist.append(fi)
+
+    return edgecorrespondences, facecorrespondences
 
 class FourierFeatureTransform(torch.nn.Module):
     """
