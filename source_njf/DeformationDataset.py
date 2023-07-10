@@ -212,10 +212,14 @@ class DeformationDataset(Dataset):
         directory_name, basename = os.path.split(os.path.join(os.path.splitext(path)[0]))
         directory = os.path.join(directory_name, "cache", f"{basename}_{ind}")
 
-        if not os.path.exists(join(directory , "vertices.npy")) and not  os.path.exists(join(directory, "faces.npy")):
+        if not os.path.exists(join(directory , "vertices.npy")) and not os.path.exists(join(directory, "faces.npy")):
             os.makedirs(directory, exist_ok=True)
             soup = PolygonSoup.from_obj(path)
             mesh = Mesh(soup.vertices, soup.indices)
+
+            # Normalize mesh
+            mesh.normalize()
+
             np.save(join(directory , "vertices.npy"), mesh.vertices)
             np.save(join(directory , "faces.npy"), mesh.faces)
 

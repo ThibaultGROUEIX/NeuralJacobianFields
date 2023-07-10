@@ -54,6 +54,11 @@ class MyNet(pl.LightningModule):
         print(f"********** centroid dim: {point_dim}")
         super().__init__()
         self.args = args
+
+        # HACK: lossgt
+        if not hasattr(args, "lossgt"):
+            args.lossgt = False
+
         self.lossfcn = UVLoss(args, self.device)
 
         # NOTE: code dim refers to the pointnet encoding. Point_dim is centroid position (also potentially fourier features)
@@ -491,7 +496,7 @@ class MyNet(pl.LightningModule):
                 if self.args.init in ["tutte", 'slim'] and self.args.ninit == -1:
                     images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
 
-                self.logger.log_image(key='3D losses', images=images, step=self.current_epoch)
+                self.logger.log_image(key='opttrans uvs', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
             # NOTE: mesh is original mesh topology (not soup)
@@ -520,13 +525,13 @@ class MyNet(pl.LightningModule):
 
                         # NOTE: can't let mesh re-export the faces because the indexing will be off
                         export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
-                                    plotname=f"Sum {key}: {np.sum(val):0.4f}", cylinders=cylinderpos,
+                                    plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
                                     cylinder_scalars=cylindervals, outline_width=0.01,
                                     device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=2, shading=False)
                     else:
                         export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
-                                    plotname=f"Sum {key}: {np.sum(val):0.4f}",
+                                    plotname=f"Avg {key}: {np.mean(val):0.4f}",
                                     fcolor_vals=val, device="cpu", n_sample=25, width=200, height=200,
                                     vmin=0, vmax=0.6, shading=False)
 
@@ -548,11 +553,19 @@ class MyNet(pl.LightningModule):
 
 
                 export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
-                            plotname=f"Poisson Distortion Loss: {np.sum(batch_parts['poissonDistortion']):0.4f}",
+                            plotname=f"Poisson Distortion Loss: {np.mean(batch_parts['poissonDistortion']):0.4f}",
                             fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
                             vmin=0, vmax=0.6, shading=False)
 
-            if self.args.lossgradientstitching and self.args.opttrans:
+            if "stitchUV" in batch_parts.keys():
+                plot_uv(save_path, f"stitch epoch {self.current_epoch:05}", batch_parts["stitchUV"].squeeze().detach().cpu().numpy(),
+                        batch_parts["ogT"].squeeze(), losses={'distortionloss': batch_parts['stitchDistortion']})
+
+                images = [os.path.join(save_path, f"stitch_epoch_{self.current_epoch:05}.png"),
+                          os.path.join(save_path, f"distortionloss_stitch_epoch_{self.current_epoch:05}.png")]
+                self.logger.log_image(key='stitch uvs', images=images, step=self.current_epoch)
+
+            if self.args.opttrans:
                 # Convert edge cuts to vertex values (separate for each tri => in order of tris)
                 cutedges = batch_parts['cutEdges'] # Indices of cut edges
                 cylinderpos = []
@@ -588,6 +601,7 @@ class MyNet(pl.LightningModule):
         initfuv = None
         sourcedim = 3
         if self.args.init == "tutte":
+            sourcedim = 2
             initj = source.tuttej.squeeze().to(self.device)
             initfuv = source.tuttefuv.squeeze().to(self.device)
         elif self.args.init == "isometric":
@@ -595,6 +609,7 @@ class MyNet(pl.LightningModule):
             initj = None # NOTE: this is guaranteed to be isometric, so don't need to composite for computing distortion
             initfuv = source.isofuv.squeeze().to(self.device)
         elif self.args.init == "slim":
+            sourcedim = 2
             initj = source.slimj.squeeze().to(self.device)
             initfuv = source.slimfuv.squeeze().to(self.device)
 
@@ -642,7 +657,7 @@ class MyNet(pl.LightningModule):
             # if self.args.lossgradientstitching:
             #     trans_V = pred_V.detach() + self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
             # Add back the optimized translational components
-            if not self.args.lossgradientstitching:
+            if self.args.lossedgeseparation:
                 pred_V += self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
 
             # Center (for visualization purposes)
@@ -683,8 +698,12 @@ class MyNet(pl.LightningModule):
             self.args.stitchlossweight = stitchweight
 
         # NOTE: pred_V should be F x 3 x 2
+        gtJ = None
+        if self.args.lossgt:
+            gtJ = source.gtJ.squeeze().to(self.device)
+
         loss = self.lossfcn.computeloss(vertices, faces, pred_V, pred_J[:,:2,:sourcedim], initjacobs=initj,
-                                        seplossdelta=seplossdelta, transuv=None)
+                                        seplossdelta=seplossdelta, transuv=None, gtjacobians=gtJ)
         lossrecord = self.lossfcn.exportloss()
         self.lossfcn.clear() # This resets the loss record dictionary
 
@@ -741,11 +760,10 @@ class MyNet(pl.LightningModule):
                 ret['cutEdges'] = cutedges
                 ret['cutLength'] = cutlength
 
-                # TODO: WE'RE CUTTING THE BOUNDARY EDGES ON ACCIDENT
-                # postv, postf, cutedges, cutlength = stitchtopology(ret['source_V'].detach().cpu().numpy(), ret['ogT'], lossrecord[0]['edgegradloss'],
-                #                                                    epsilon=self.args.stitcheps,
-                #                                                    return_cut_edges=True, return_cut_length = True)
-                # meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(postv, postf, source.source_dir, source._SourceMesh__ttype, cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks, load_wks_centroids=source._SourceMesh__use_wks)
+                ### Create new topology based on least squares cuts
+                # meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(postv, postf, source.source_dir, source._SourceMesh__ttype,
+                #                                                                      cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks,
+                #                                                                      load_wks_centroids=source._SourceMesh__use_wks)
                 # meshprocessor.prepare_temporary_differential_operators(source._SourceMesh__ttype)
                 # poissonsolver = meshprocessor.diff_ops.poisson_solver
                 # with torch.no_grad():
@@ -765,21 +783,17 @@ class MyNet(pl.LightningModule):
                 #     stitchJ = poissonsolver.jacobians_from_vertices(stitchv)
             else:
                 ret['pred_V'] = pred_V.detach().reshape(-1, 2)
+
             ret['T'] = np.arange(len(faces)*3).reshape(len(faces), 3)
 
-            # NOTE: Poisson solve on updated topology
-            # with torch.no_grad():
-            #     pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
+            # NOTE: Poisson solve on original topology
+            with torch.no_grad():
+                pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
 
-            # # Predicted UV should also be same up to global translation
-            # # predfvert = ret['pred_V'][ret['T']]
-            # # poisfvert = pred_V[0][ret['ogT']]
-            # # diff = predfvert - poisfvert[:,:,:2]
-
-            # ret['poissonUV'] = pred_V
-            # # NOTE: Initj already FACTORED into the predict map!!
-            # poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
-            # ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
+            ret['poissonUV'] = pred_V
+            # NOTE: Initj already FACTORED into the predict map!!
+            poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
+            ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
 
         if self.args.test:
             ret['pred_J_R'] = poisson_J_restricted.detach()
@@ -1016,12 +1030,12 @@ class MyNet(pl.LightningModule):
         if self.args.optimizer == "sgd":
             optimizer = torch.optim.SGD(list(self.parameters()), lr=self.lr)
         # scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
-        scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
-                                                                min_lr=1e-7, verbose=True)
+        # scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
+        #                                                         min_lr=1e-7, verbose=True)
 
         # Add translation as additional parameter
         # NOTE: With gradient stitching, we use L0 weighted least squares instead
-        if self.args.no_poisson and not self.args.lossgradientstitching:
+        if self.args.no_poisson and self.args.lossedgeseparation:
             self.trainer.fit_loop.setup_data()
             dataloader = self.trainer.train_dataloader
             for i, bundle in enumerate(dataloader):
@@ -1033,13 +1047,13 @@ class MyNet(pl.LightningModule):
                 optimizer.add_param_group({"params": additional_parameters, 'lr': self.lr}) # Direct optimization needs to be 100x larger
 
                 # HACK: Need to also extend scheduler's min_lrs
-                scheduler1.min_lrs.append(1e-7)
+                # scheduler1.min_lrs.append(1e-7)
 
         return {"optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler1,
-                    "monitor": "train_loss",
-                    },
+                # "lr_scheduler": {
+                #     "scheduler": scheduler1,
+                #     "monitor": "train_loss",
+                #     },
                 }
 
 def custom_collate(data):
@@ -1178,7 +1192,7 @@ def main(gen, args):
                          num_nodes=1,
                          gradient_clip_val=args.gradclip,
                          deterministic= args.deterministic,
-                         strategy='ddp',
+                         strategy='ddp' if torch.cuda.is_available() else None,
                          callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
     # Cache directory

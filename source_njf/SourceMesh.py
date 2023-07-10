@@ -130,11 +130,27 @@ class SourceMesh:
 
         self.poisson = self.mesh_processor.diff_ops.poisson_solver
 
+        ### Load ground truth jacobians if set
+        if self.args.lossgt:
+            gtdir = os.path.join(self.source_dir, "..", "..", "gtJ.npy")
+            if not os.path.exists(gtdir):
+                raise ValueError("No ground truth jacobians found at {}".format(gtdir))
+            gtJ = np.load(gtdir).transpose(0, 2, 1)
+
+            # if self.args.debug:
+            #     # Sanity check poisson solve
+            #     gtJ_sanity = np.concatenate([gtJ, np.zeros((gtJ.shape[0], 1, gtJ.shape[2]))], axis=1)[None,:,:,:]
+            #     gtV = self.vertices_from_jacobians(torch.from_numpy(gtJ_sanity)).squeeze().detach().cpu().numpy()
+            #     import matplotlib.pyplot as plt
+            #     fig, axs = plt.subplots()
+            #     axs.triplot(gtV[:,0], gtV[:,1], self.get_source_triangles(), linewidth=0.5)
+            #     plt.axis('off')
+            #     plt.savefig(f"scratch/{self.source_ind}_gtuv.png")
+            #     plt.close(fig)
+            #     plt.cla()
+
         # First check if initialization cached
         # TODO: Isometric initialization with curriculum learning (only sample limited range of rotations)
-
-
-        # TODO: SLIM initialization (not to convergence)
 
         # Precompute Tutte if set
         if self.init == "tutte":
@@ -241,6 +257,16 @@ class SourceMesh:
                 ## Save the global translations
                 self.tuttetranslate = (checktutte - pred_V)[:,:,:2]
 
+                ## Compute ground truth if set
+                if self.args.lossgt:
+                    from numpy.linalg import pinv
+                    invJ = pinv(self.tuttej.detach().cpu().numpy()[:,:,:2,:]) # 1 x F x 3 x 2
+                    self.gtJ = torch.from_numpy(gtJ @ invJ) # 1 x F x 2 x 2
+                    checkJ = self.gtJ @ self.tuttej[:,:,:2,:]
+                    # np.testing.assert_allclose(checkJ, gtJ, atol=1e-5, rtol=1e-5)
+
+                    torch.save(self.gtJ, os.path.join(self.source_dir, "tmpgtJ.pt"))
+
                 # Cache everything
                 torch.save(self.tuttefuv, os.path.join(self.source_dir, "tuttefuv.pt"))
                 torch.save(self.tutteuv, os.path.join(self.source_dir, "tutteuv.pt"))
@@ -253,6 +279,8 @@ class SourceMesh:
             self.__loaded_data['tutteuv'] = self.tutteuv
             self.__loaded_data['tuttej'] = self.tuttej
             self.__loaded_data['tuttetranslate'] = self.tuttetranslate
+            if self.args.lossgt:
+                self.__loaded_data['gtJ'] = self.gtJ
 
             if self.initjinput:
                 self.centroids_and_normals = torch.cat([self.centroids_and_normals, self.tuttej.reshape(len(self.centroids_and_normals), -1)], dim=1)
@@ -374,6 +402,16 @@ class SourceMesh:
                 ## Save the global translations
                 self.slimtranslate = (checkslim - pred_V)[:,:,:2]
 
+                ## Compute ground truth if set
+                if self.args.lossgt:
+                    from numpy.linalg import pinv
+                    invJ = pinv(self.slimj.detach().cpu().numpy()[:,:,:2,:]) # F x 3 x 2
+                    self.gtJ = torch.from_numpy(gtJ @ invJ) # F x 2 x 2
+                    checkJ = self.gtJ @ self.slimj[:,:,:2,:]
+                    # np.testing.assert_allclose(checkJ, gtJ, atol=1e-5, rtol=1e-5)
+
+                    torch.save(self.gtJ, os.path.join(self.source_dir, "tmpgtJ.pt"))
+
                 # Cache everything
                 torch.save(self.slimfuv, os.path.join(self.source_dir, "slimfuv.pt"))
                 torch.save(self.slimuv, os.path.join(self.source_dir, "slimuv.pt"))
@@ -386,6 +424,8 @@ class SourceMesh:
             self.__loaded_data['slimuv'] = self.slimuv
             self.__loaded_data['slimj'] = self.slimj
             self.__loaded_data['slimtranslate'] = self.slimtranslate
+            if self.args.lossgt:
+                self.__loaded_data['gtJ'] = self.gtJ
 
             if self.initjinput:
                 self.centroids_and_normals = torch.cat([self.centroids_and_normals, self.slimj.reshape(len(self.centroids_and_normals), -1)], dim=1)
@@ -437,7 +477,10 @@ class SourceMesh:
 
                 # Randomly sample displacements
                 # NOTE: might need to alter the scales here
-                self.isofuv = local_tris + np.random.uniform(size=(local_tris.shape[0], 1, local_tris.shape[2])) # F x 3 x 2
+                if self.args.noiseiso:
+                    local_tris = local_tris + np.random.uniform(size=(local_tris.shape[0], 1, local_tris.shape[2])) # F x 3 x 2
+                else:
+                    self.isofuv = local_tris
 
                 # Unit testing: face areas should be same as in 3D
                 from meshing.mesh import Mesh
@@ -466,7 +509,7 @@ class SourceMesh:
                 isosoup = self.isofuv.reshape(-1, 2).detach().cpu().numpy() # V x 2
 
                 # Get Jacobians
-                self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1)
+                self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1) # F x 3 x 2
 
                 ## Debugging: make sure we can get back the original UVs up to global translation
                 pred_V = torch.einsum("abc,acd->abd", (fverts, self.isoj.transpose(2,1)))
@@ -476,6 +519,16 @@ class SourceMesh:
 
                 ## Save the global translations
                 self.isotranslate = self.isofuv - pred_V
+
+                ## Compute ground truth if set
+                if self.args.lossgt:
+                    from numpy.linalg import pinv
+                    invJ = pinv(self.isoj.detach().cpu().numpy()) # F x 3 x 2
+                    self.gtJ = torch.from_numpy(gtJ @ invJ) # F x 2 x 2
+                    checkJ = self.gtJ @ self.isoj
+                    # np.testing.assert_allclose(checkJ, gtJ, atol=1e-5, rtol=1e-5)
+
+                    torch.save(self.gtJ, os.path.join(self.source_dir, "tmpgtJ.pt"))
 
                 # Cache everything
                 torch.save(self.isofuv, os.path.join(self.source_dir, "isofuv.pt"))
@@ -487,32 +540,13 @@ class SourceMesh:
             self.__loaded_data['isofuv'] = self.isofuv
             self.__loaded_data['isoj'] = self.isoj
             self.__loaded_data['isotranslate'] = self.isotranslate
+            if self.args.lossgt:
+                self.__loaded_data['gtJ'] = self.gtJ
 
             if self.initjinput:
                 self.centroids_and_normals = torch.cat([self.centroids_and_normals, self.isoj.reshape(len(self.centroids_and_normals), -1)], dim=1)
 
-            # self.__loaded_data['localj'] = self.localj
-
-            # Debugging: plot the initial embedding
-            # import matplotlib.pyplot as plt
-            # fig, axs = plt.subplots(figsize=(6, 4))
-            # # plot ours
-            # axs.triplot(self.tutteuv[0,:,0], self.tutteuv[0,:,1], self.get_source_triangles(), linewidth=0.5)
-            # plt.axis('off')
-            # plt.savefig(f"scratch/{self.source_ind}.png")
-            # plt.close(fig)
-            # plt.cla()
-
-        # TODO: OBVIOUSLY THIS WONT WORK WITH LEARNING -- NEED INPUT TO BE FUNCTION OF THE SAMPLED INITIALIZATION
-        # Initialize random flat vector if set
-        # if self.flatten == "random":
-        #     self.flat_vector = torch.rand(1, len(self.mesh_processor.faces) * 9) * 100
-
-        # if self.flatten == "xyz":
-        #     # Initialize with all triangle centroid positions
-        #     self.flat_vector = self.centroids_and_normals[:,:3].reshape(1, -1)
-
-        # Use initialization jacobians as input
+        ### Dense: Use initialization jacobians as input
         if self.flatten == "input":
             if self.init == "tutte":
                 self.flat_vector = self.tuttej.reshape(1, -1)
