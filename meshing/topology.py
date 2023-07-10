@@ -510,3 +510,73 @@ class Topology():
             for e_id, _ in self.edges.items()
         ]
         return mask
+
+    # Checks if current face f is consistently oriented against adjf
+    def _check_orientation(self, f, adjf, hef, orientation_dict):
+        if f.isBoundaryLoop():
+            return
+
+        if f in orientation_dict:
+            return
+
+        assert hef.twin.face == adjf, f"Error: {f} and {adjf} are not adjacent."
+        currentorient = orientation_dict[adjf]
+
+        # Flipped orientation
+        if hef.vertex == hef.twin.vertex:
+            orientation_dict[f] = 1 - currentorient
+        else:
+            orientation_dict[f] = currentorient
+
+        for e in f.adjacentEdges():
+            adjhe = e.halfedge if e.halfedge.face != f else e.halfedge.twin
+            self._check_orientation(adjhe.face, f, adjhe, orientation_dict)
+
+    def get_orientation_dict(self):
+        startingface = None
+        for fidx, f in sorted(self.faces.items()):
+            if not f.isBoundaryLoop():
+                startingface = f
+                break
+        if not startingface:
+            raise ValueError(f"Mesh only contains boundary loops!")
+
+        orientation_dict = {startingface: 0}
+        for e in startingface.adjacentEdges():
+            adjhe = e.halfedge if e.halfedge.face != startingface else e.halfedge.twin
+            adjf = adjhe.face
+            self._check_orientation(adjf, startingface, adjhe, orientation_dict)
+
+        assert len(orientation_dict) == len(self.faces), f"orientation_dict has {len(orientation_dict)} faces but mesh has {len(self.faces)} faces!"
+        return orientation_dict
+
+    ### Check that all triangles are consistently oriented -- if fix is true then we swap to the majority orientation
+    def check_orientation(self, fix=False):
+        orientationdict = self.get_orientation_dict()
+
+        ## Check orientation counts
+        orientationvals = list(orientationdict.values())
+        numorient0 = orientationvals.count(0)
+        numorient1 = orientationvals.count(1)
+        if numorient0 > 0 and numorient1 > 0:
+            if not fix:
+                return False
+            else:
+                ## Fix orientation by flipping all the minority orientations
+                fliporient = 0 if numorient0 < numorient1 else 1
+                for f, orient in orientationdict.items():
+                    if orient == fliporient:
+                        hes = list(f.adjacentHalfedges())
+                        for i in range(len(hes)):
+                            he = hes[i]
+                            he.vertex = he.next.vertex
+                            he.next = hes[(i+2)%len(hes)]
+
+                newdict = self.get_orientation_dict()
+
+                orientcheck = np.sum(list(newdict.values()))
+                if orientcheck != 0:
+                    print(f"Orientation fix failed! Found {orientcheck} flipped triangles.")
+                    return False
+
+        return True
