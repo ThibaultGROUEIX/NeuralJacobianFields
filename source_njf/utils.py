@@ -1028,6 +1028,20 @@ def edge_soup_correspondences(fs):
 
     return edgecorrespondences, facecorrespondences
 
+## Original vertices to soup vertices
+def vertex_soup_correspondences(fs):
+    from collections import defaultdict
+    vcorrespondence = defaultdict(list) # {ogv} (original topology) => [list of soup vertices] (soup vertices indexing F*3 x 3)
+    for fi in range(len(fs)):
+        f = fs[fi]
+        for i in range(3):
+            currentlist = vcorrespondence[f[i]]
+
+            # Find the corresponding index in the tutte vertex soup
+            currentlist.append(fi * 3 + i)
+
+    return vcorrespondence
+
 class FourierFeatureTransform(torch.nn.Module):
     """
     An implementation of Gaussian Fourier feature mapping.

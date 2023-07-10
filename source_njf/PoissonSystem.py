@@ -354,6 +354,7 @@ class PoissonSolver:
         # torch.cuda.synchronize()
         # print(f"SOLVER decomposition {time.time() - st}")
 
+        # NOTE: Jacobians go from (B x F x 3 x 3) => (B x F*3 x 3) with last two dimensions swapped (restriction dimension goes to last column)
         sol = _predicted_jacobians_to_vertices_via_poisson_solve(self.my_splu, self.sparse_rhs, jacobians.transpose(2, 3).reshape(jacobians.shape[0], -1, 3, 1).squeeze(3).contiguous())
 
         if self.lap_pinned is not None:
@@ -383,7 +384,7 @@ class PoissonSolver:
         # self.sparse_grad.pin_memory()
         # self.sparse_rhs.pin_memory()
 
-
+# NOTE: Differential operators computed here!!!!
 def poisson_system_matrices_from_mesh( V,F, dim=3,ttype = torch.float64, is_sparse=True,cpuonly=False):
     '''
     compute poisson matricees for a given mesh
