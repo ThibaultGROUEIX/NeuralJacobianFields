@@ -973,6 +973,23 @@ def run_slim(mesh, cut=True, verbose=False, time=False, max_boundaries=20):
     return uvmap, energy, did_cut
 
 # Get Jacobian of UV map
+def get_jacobian_torch(vs, fs, uvmap):
+    # Visualize distortion
+    from igl import grad
+    import torch
+    G = torch.from_numpy(np.array(grad(vs.detach().cpu().numpy(), fs.detach().cpu().numpy()).todense()))
+
+    # NOTE: currently gradient is organized as X1, X2, X3, ... Y1, Y2, Y3, ... Z1, Z2, Z3 ... resort to X1, Y1, Z1, ...
+    splitind = G.shape[0]//3
+    newG = torch.zeros(G.shape)
+    newG[::3] = G[:splitind]
+    newG[1::3] = G[splitind:2*splitind]
+    newG[2::3] = G[2*splitind:]
+
+    J = (newG @ uvmap).reshape(-1, 3, 2).transpose(2,1) # F x 2 x 3
+    return J
+
+# Get Jacobian of UV map
 def get_jacobian(vs, fs, uvmap):
     # Visualize distortion
     from igl import grad
