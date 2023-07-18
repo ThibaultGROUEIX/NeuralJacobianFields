@@ -20,28 +20,30 @@ parser.add_argument("--niters",
 
 args = parser.parse_args()
 
+device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+
 ### Weighting experiments
 datadir = args.objdir
 soup = PolygonSoup.from_obj(datadir)
 mesh = Mesh(soup.vertices, soup.indices)
 
-ogvertices = torch.from_numpy(mesh.vertices).float()
-ogfaces = torch.from_numpy(mesh.faces).long()
+ogvertices = torch.from_numpy(mesh.vertices).float().to(device)
+ogfaces = torch.from_numpy(mesh.faces).long().to(device)
 
 ogfverts = mesh.vertices[mesh.faces]
-soupvs = torch.from_numpy(ogfverts.reshape(-1, 3)).float()
+soupvs = torch.from_numpy(ogfverts.reshape(-1, 3)).float().to(device)
 soupfs = torch.arange(len(soupvs)).reshape(-1, 3).long()
 
 # Compute tutte embedding of original mesh
 from source_njf.utils import tutte_embedding, get_jacobian_torch, SLIM
-slimuv = torch.from_numpy(SLIM(mesh)[0]).float()
+slimuv = torch.from_numpy(SLIM(mesh)[0]).float().to(device)
 # slimuv = torch.from_numpy(tutte_embedding(mesh.vertices, mesh.faces)).float()
-vertices = torch.from_numpy(mesh.vertices).float()
-faces = torch.from_numpy(mesh.faces).long()
+vertices = torch.from_numpy(mesh.vertices).float().to(device)
+faces = torch.from_numpy(mesh.faces).long().to(device)
 fverts = vertices[faces]
 
 # Get Jacobians
-slimj = get_jacobian_torch(vertices, faces, slimuv) # F x 2 x 3
+slimj = get_jacobian_torch(vertices, faces, slimuv).to(device) # F x 2 x 3
 slimj = torch.cat((slimj, torch.zeros((slimj.shape[0], 1, 3))), axis=1) # F x 3 x 3
 slimj.requires_grad_()
 
@@ -70,14 +72,14 @@ np.testing.assert_allclose(np.sum(laplace, axis=1), 0, atol=1e-4)
 grad = grad.todense()
 
 ## Convert to torch tensors
-laplace = torch.from_numpy(laplace).float()
-rhs = torch.from_numpy(rhs).float()
+laplace = torch.from_numpy(laplace).float().to(device)
+rhs = torch.from_numpy(rhs).float().to(device)
 
 # Triangle soup solve
 input = slimj.transpose(2, 1).reshape(1, -1, 3) # 1 x F*3 x 3
 
 # Reshape the Jacobians to match the format of grad (vertex ordering STAYS THE SAME)
-P = torch.zeros(input.shape)
+P = torch.zeros(input.shape).to(device)
 k = input.shape[1] // 3
 P[:, :k, :] = input[:, ::3] # First row of all jacobians together
 P[:, k:2 * k, :] = input[:, 1::3] # Second row of all jacobians together
@@ -101,9 +103,9 @@ jacweight = 10
 distweight = 0.1
 sparseweight = 1
 seplossdelta = 0.1
-weight_idxs = (torch.tensor([pair[0] for pair in valid_pairs]), torch.tensor([pair[1] for pair in valid_pairs]))
+weight_idxs = (torch.tensor([pair[0] for pair in valid_pairs]).to(device), torch.tensor([pair[1] for pair in valid_pairs]).to(device))
 # weights = (torch.rand(len(weight_idxs[0])) - 0.5) * 4 # -2 to 2
-weights = torch.zeros(len(weight_idxs[0]))
+weights = torch.zeros(len(weight_idxs[0])).to(device)
 weights.requires_grad_()
 optim = torch.optim.Adam([weights, slimj], lr=1e-4)
 
