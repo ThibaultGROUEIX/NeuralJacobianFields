@@ -5,12 +5,15 @@ import os
 import fresnel
 
 def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=2, logger=None,
-            ftoe=None):
+            ftoe=None, facecolors = None):
     # First center the predicted vertices
     pred_vertices -= np.mean(pred_vertices, 0, keepdims=True) # Sum batched over faces, vertex dimension
     tris = Triangulation(pred_vertices[:, 0], pred_vertices[:, 1], triangles=triangles)
 
     # setup side by side plots
+    if facecolors is None:
+        facecolors=np.ones(len(triangles)) * 0.5
+
     fname = "_".join(name.split())
     if gt_vertices:
         fig, axs = plt.subplots(1,2,figsize=(15, 4))
@@ -37,8 +40,8 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
         fig, axs = plt.subplots(figsize=(5, 5))
         # plot ours
         axs.set_title(name)
-        axs.tripcolor(tris, facecolors=np.ones(len(triangles)) * 0.5,
-                                linewidth=0.5, edgecolor="black")
+        axs.tripcolor(tris, facecolors=facecolors,
+                            linewidth=0.5, edgecolor="black")
         plt.axis('off')
         axs.axis('equal')
         plt.savefig(os.path.join(path, f"{fname}.png"))
@@ -177,9 +180,14 @@ def export_views(vertices, faces, savedir, n=5, n_sample=20, width=150, height=1
     fig, axs = plt.subplots(nrows=1, ncols=len(renders), gridspec_kw={'wspace':0, 'hspace':0}, figsize=(15, 4), squeeze=True)
     for i in range(len(renders)):
         render = renders[i]
-        axs[i].set_xticks([])
-        axs[i].set_yticks([])
-        axs[i].imshow(render, interpolation='lanczos')
+        if len(renders) == 1:
+            axs.set_xticks([])
+            axs.set_yticks([])
+            axs.imshow(render, interpolation='lanczos')
+        else:
+            axs[i].set_xticks([])
+            axs[i].set_yticks([])
+            axs[i].imshow(render, interpolation='lanczos')
     fig.suptitle(plotname)
     fig.tight_layout()
     plt.savefig(os.path.join(savedir, filename))
