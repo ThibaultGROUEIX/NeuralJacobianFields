@@ -428,12 +428,13 @@ class MyNet(pl.LightningModule):
             Path(save_path).mkdir(exist_ok=True, parents=True)
 
         # Save latest predictions
-        np.save(os.path.join(source_path, f"latest_preduv.npy"), batch_parts['pred_V'].squeeze().detach().cpu().numpy())
+        np.save(os.path.join(self.logger.save_dir, f"latest_preduv.npy"), batch_parts['pred_V'].squeeze().detach().cpu().numpy())
 
         if self.args.opttrans:
-            np.save(os.path.join(source_path, f"latest_preduv.npy"), batch_parts['pred_V_opttrans'].squeeze().detach().cpu().numpy())
+            np.save(os.path.join(self.logger.save_dir, f"latest_preduv.npy"), batch_parts['pred_V_opttrans'].squeeze().detach().cpu().numpy())
 
-        np.save(os.path.join(source_path, f"latest_predt.npy"), batch_parts['T'])
+        np.save(os.path.join(self.logger.save_dir, f"latest_predt.npy"), batch_parts['T'])
+        np.save(os.path.join(self.logger.save_dir, f"latest_j.npy"), batch_parts['T'])
 
         # if self.args.no_poisson:
         #     np.save(os.path.join(source_path, f"latest_poissonuv.npy"), batch_parts['poissonUV'].squeeze().detach().cpu().numpy())

@@ -160,11 +160,20 @@ if args.continuetrain and os.path.exists(os.path.join(screendir, "weights.pt")) 
     initj.requires_grad_()
 
     optim = torch.optim.Adam([weights, initj], lr=args.lr)
-    with open(os.path.join(screendir, "epoch.pkl"), "rb") as f:
-        starti = pickle.load(f)
 
-    with open(os.path.join(screendir, "lossdict.pkl"), "rb") as f:
-        lossdict = pickle.load(f)
+    try:
+        with open(os.path.join(screendir, "epoch.pkl"), "rb") as f:
+            starti = pickle.load(f)
+    except Exception as e:
+        print(e)
+        starti = 0
+
+    try:
+        with open(os.path.join(screendir, "lossdict.pkl"), "rb") as f:
+            lossdict = pickle.load(f)
+    except Exception as e:
+        print(e)
+        lossdict = defaultdict(list)
 
     print(f"\n============ Continuing optimization from epoch {starti} ===========\n")
 else:
