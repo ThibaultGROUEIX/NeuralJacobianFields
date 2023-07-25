@@ -258,7 +258,7 @@ def vertexseparation(vs, fs, uv, loss='l1'):
     for ogv, vlist in vcorrespondences.items():
         vpairs.extend(list(combinations(vlist, 2)))
     vpairs = torch.tensor(vpairs, device=uv.device)
-    uvpairs = uv[vpairs] # V  x 2 x 2
+    uvpairs = uv[vpairs] # V x 2 x 2
 
     if loss == "l1":
         separation = torch.nn.functional.l1_loss(uvpairs[:,0], uvpairs[:,1], reduction='none')

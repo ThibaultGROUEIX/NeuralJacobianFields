@@ -345,7 +345,8 @@ for k, v in lossdict.items():
 # Save final UVs, weights, and jacobians
 np.save(os.path.join(screendir, "uv.npy"), full_uvs.detach().cpu().numpy())
 np.save(os.path.join(screendir, "weights.npy"), weights.detach().cpu().numpy())
-np.save(os.path.join(screendir, "jacobians.npy"), initj.detach().cpu().numpy())
+np.save(os.path.join(screendir, "targetjacobians.npy"), initj.detach().cpu().numpy())
+np.save(os.path.join(screendir, "poisjacobians.npy"), poisj.detach().cpu().numpy())
 
 # Plot final UVs
 plot_uv(screendir, f"finaluv", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(), losses=None,
