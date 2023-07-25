@@ -25,6 +25,8 @@ parser.add_argument("--init", type=str, choices={'slim', 'isometric'},
                     default='slim')
 parser.add_argument("--vertexseploss",
                     action='store_true', default=False)
+parser.add_argument("--edgegradloss",
+                    action='store_true', default=False)
 parser.add_argument("--jmatchloss",
                     action='store_true', default=False)
 parser.add_argument("--symmetricdirichletloss",
@@ -136,7 +138,7 @@ for ogv, vlist in sorted(vcorrespondences.items()):
     valid_pairs.extend(list(combinations(vlist, 2)))
 
 # Initialize random weights
-from source_njf.losses import vertexseparation, symmetricdirichlet
+from source_njf.losses import vertexseparation, symmetricdirichlet, uvgradloss
 from source_njf.utils import get_jacobian_torch, clear_directory
 
 jacweight = 10
@@ -261,11 +263,20 @@ for i in range(starti, args.niters):
     if args.vertexseploss:
         separationloss = torch.sum(vertexseparation(ogvertices, ogfaces, full_uvs, loss='l2'), dim=1)
 
-        # L0 relaxation
+        # Continual L0
         separationloss = (separationloss * separationloss)/(separationloss * separationloss + seplossdelta)
         loss += torch.mean(separationloss)
 
         lossdict['Vertex Separation Loss'].append(torch.mean(separationloss).item())
+
+    if args.edgegradloss:
+        edgegradloss, edgecorrespondences = uvgradloss(ogfaces, full_uvs, return_edge_correspondence=True, loss='l2')
+
+        # Continual L0
+        edgegradloss = (edgegradloss * edgegradloss)/(edgegradloss * edgegradloss + seplossdelta)
+        loss += torch.mean(edgegradloss)
+
+        lossdict['Edge Gradient Loss'].append(torch.mean(edgegradloss).item())
 
     poisj = get_jacobian_torch(soupvs, soupfs, full_uvs, device=device)
     if args.jmatchloss:
