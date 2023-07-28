@@ -356,7 +356,7 @@ for i in range(starti, args.niters):
         elif args.edgecutloss == "threshold":
             raise NotImplementedError("Threshold edge cut loss not implemented")
 
-        loss += torch.sum(edgecutloss)
+        loss += torch.mean(edgecutloss)
         lossdict['Edge Cut Loss'].append(torch.mean(edgecutloss).item())
 
     if args.edgegradloss:
@@ -415,7 +415,7 @@ for i in range(starti, args.niters):
         assert stitchweight.requires_grad == False
 
     # Visualize every 100 epochs
-    if i % 100 == 0:
+    if i % 10000 == 0:
         if not cluster:
             ps.init()
             ps.remove_all_structures()
@@ -475,27 +475,29 @@ if args.vertexseploss:
         separationloss = weightedseparationloss.detach().cpu().numpy()
     else:
         separationloss = separationloss.detach().cpu().numpy()
+
+    assert len(valid_pairs) == len(separationloss), f"Separation loss {len(separationloss)} should have entry for each of {len(valid_pairs)} pairs."
+
     fig.suptitle(f"Avg Vertex Loss: {np.mean(separationloss):0.8f}")
     cmap = plt.get_cmap("Reds")
 
     # Convert separation loss to per vertex
     from collections import defaultdict
-    count = 0
     vlosses = defaultdict(np.double)
     vlosscount = defaultdict(int)
-    for pair in valid_pairs:
-        vlosses[pair[0]] += separationloss[count]
-        vlosses[pair[1]] += separationloss[count]
+    for i in range(len(valid_pairs)):
+        pair = valid_pairs
+        vlosses[pair[0]] += separationloss[i]
+        vlosses[pair[1]] += separationloss[i]
         vlosscount[pair[0]] += 1
         vlosscount[pair[1]] += 1
-        count += 1
 
     # NOTE: Not all vertices will be covered in vlosses b/c they are boundary vertices
     vseplosses = np.zeros(len(finaluvs))
     for k, v in sorted(vlosses.items()):
         vseplosses[k] = v / vlosscount[k]
 
-    axs.tripcolor(tris, np.array(vseplosses), cmap=cmap,
+    axs.tripcolor(tris, vseplosses, cmap=cmap, shading='gouraud',
                     linewidth=0.5, vmin=0, vmax=0.5, edgecolor='black')
     plt.axis('off')
     axs.axis("equal")
