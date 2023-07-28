@@ -81,7 +81,7 @@ class Mesh:
                         face = faces[i]
                         faceuv = fuv[i]
                         fnormal = fnormals[i]
-                        f.write(f"f {face[0]+1:d}/{faceuv[0]+1:d}/{fnormal[0]+1:d} {face[1]+1:d}/{faceuv[1]+1:d}/{fnormal[1]+1:d} {face[2]+1:d}/{faceuv[2]+1:d}/{fnormal[2]+1:d}\n")
+                        f.write(f"f {face[0]+1:d}/{faceuv[0]+1:d}/{fnormal[0]+1:f} {face[1]+1:d}/{faceuv[1]+1:d}/{fnormal[1]+1:f} {face[2]+1:d}/{faceuv[2]+1:d}/{fnormal[2]+1:f}\n")
                 else:
                     for i in range(len(faces)):
                         face = faces[i]
@@ -91,7 +91,7 @@ class Mesh:
                 for i in range(len(faces)):
                     face = faces[i]
                     fnormal = fnormals[i]
-                    f.write(f"f {face[0]+1:d}//{fnormal[0]+1:d} {face[1]+1:d}//{fnormal[1]+1:d} {face[2]+1:d}//{fnormal[2]+1:d}\n")
+                    f.write(f"f {face[0]+1:d}//{fnormal[0]+1:f} {face[1]+1:d}//{fnormal[1]+1:f} {face[2]+1:d}//{fnormal[2]+1:f}\n")
             else:
                 for i in range(len(faces)):
                     face = faces[i]

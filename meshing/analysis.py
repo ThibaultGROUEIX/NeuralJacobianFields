@@ -72,6 +72,20 @@ def computeFaceAreas(mesh):
     n = 0.5 * np.linalg.norm(np.cross(edges1, edges2, axis=1), axis=1)
     mesh.fareas = n
 
+def computeFaceNormals(mesh):
+    # NOTE: Determinant of transpose is same as standard determinant!
+    edges1 = []
+    edges2 = []
+    for key, f in sorted(mesh.topology.faces.items()):
+        if f.isBoundaryLoop():
+            continue
+        u = mesh.vector(f.halfedge)
+        v = -1 * mesh.vector(f.halfedge.prev())
+        edges1.append(u)
+        edges2.append(v)
+    n = np.cross(edges1, edges2, axis=1)
+    mesh.fnormals = n
+
 # Mean of adjacent face normals
 def computeVertexNormals(mesh):
     if not hasattr(mesh, "facenormals"):

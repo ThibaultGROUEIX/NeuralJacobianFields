@@ -1100,3 +1100,85 @@ class FourierFeatureTransform(torch.nn.Module):
 
         res = 2 * np.pi * res
         return torch.cat([x, torch.sin(res), torch.cos(res)], dim=1)
+
+def signed_volume(v, f):
+    # Add up signed volume of tetrahedra for each face
+    # If triangles, then one of these vertices is the origin
+    if f.shape[1] == 3:
+        f = np.hstack([f, np.ones(len(f)).reshape(len(f), 1) * len(v)]).astype(int)
+        v = np.vstack([v, np.zeros(3).reshape(1, 3)])
+    fverts = v[f]
+    fvectors = fverts - fverts[:,3, None,:]
+    # Triple scalar product
+    volume = 1/6 * np.sum(np.sum(fvectors[:,0,:] * np.cross(fvectors[:,1,:], fvectors[:,2,:], axis=1), axis=1))
+    return volume
+
+def get_flipped_triangles(vertices, faces):
+    """ Given 2D vertices, and set of new 2D vertices, find triangles that have flipped orientation """
+    # For each original 3D triangle, compute the normal
+    from meshing.mesh import Mesh
+    from meshing.analysis import computeFaceNormals
+
+    # Old and new vertices must be of same dimension -- otherwise comparison makes no sense!
+    assert vertices.shape[1] == 2, f"Vertices must be 2D! {vertices.shape[1]} != 2"
+
+    # Compute cross product of edge vectors => signed area in 2D
+    mesh = Mesh(vertices, faces)
+    computeFaceNormals(mesh)
+
+    # Flipped triangles have negative determinant
+    flipped = np.where(mesh.fnormals < 0)[0]
+
+    return flipped
+
+class DifferentiableThreshold(torch.autograd.Function):
+    """
+    In the forward pass this operation behaves like a threshold (> epsilon => 1, else 0).
+    But in the backward pass its gradient is 1 everywhere the threshold is passed.
+    """
+
+    @staticmethod
+    # @custom_fwd
+    def forward(ctx, input, min, max):
+        return input.clamp(min=min, max=max)
+
+    @staticmethod
+    # @custom_bwd
+    def backward(ctx, grad_output):
+        return grad_output.clone(), None, None
+
+
+def dclamp(input, min, max):
+    """
+    Like torch.clamp, but with a constant 1-gradient.
+    :param input: The input that is to be clamped.
+    :param min: The minimum value of the output.
+    :param max: The maximum value of the output.
+    """
+    return DifferentiableClamp.apply(input, min, max)
+
+class DifferentiableClamp(torch.autograd.Function):
+    """
+    In the forward pass this operation behaves like torch.clamp.
+    But in the backward pass its gradient is 1 everywhere, as if instead of clamp one had used the identity function.
+    """
+
+    @staticmethod
+    # @custom_fwd
+    def forward(ctx, input, min, max):
+        return input.clamp(min=min, max=max)
+
+    @staticmethod
+    # @custom_bwd
+    def backward(ctx, grad_output):
+        return grad_output.clone(), None, None
+
+
+def dclamp(input, min, max):
+    """
+    Like torch.clamp, but with a constant 1-gradient.
+    :param input: The input that is to be clamped.
+    :param min: The minimum value of the output.
+    :param max: The maximum value of the output.
+    """
+    return DifferentiableClamp.apply(input, min, max)
