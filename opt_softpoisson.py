@@ -360,7 +360,7 @@ for i in range(starti, args.niters):
         lossdict['Edge Cut Loss'].append(torch.mean(edgecutloss).item())
 
     if args.edgegradloss:
-        edgegradloss, edgecorrespondences = uvgradloss(ogfaces, full_uvs, return_edge_correspondence=True, loss='l2')
+        edgegradloss, edgecorrespondences = uvgradloss(ogvertices, ogfaces, full_uvs, return_edge_correspondence=True, loss='l2')
 
         # Continual L0
         edgegradloss = (edgegradloss * edgegradloss)/(edgegradloss * edgegradloss + seplossdelta)

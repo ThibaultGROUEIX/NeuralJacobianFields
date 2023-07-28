@@ -126,7 +126,7 @@ class UVLoss:
 
         if self.args.lossgradientstitching:
             if self.args.lossgradientstitching != 'split':
-                edgegradloss, edgecorrespondences = uvgradloss(faces, uv, return_edge_correspondence=True, loss=self.args.lossgradientstitching)
+                edgegradloss, edgecorrespondences = uvgradloss(vertices, faces, uv, return_edge_correspondence=True, loss=self.args.lossgradientstitching)
 
                 if self.args.lossgradientstitching in ['l1', 'l2']:
                     edgegradloss = torch.sum(edgegradloss, dim=1)
@@ -255,7 +255,7 @@ def vertexseparation(vs, fs, uv, loss='l1'):
     from meshing import Mesh
     vcorrespondences = vertex_soup_correspondences(fs.detach().cpu().numpy())
     vpairs = []
-    for ogv, vlist in vcorrespondences.items():
+    for ogv, vlist in sorted(vcorrespondences.items()):
         vpairs.extend(list(combinations(vlist, 2)))
     vpairs = torch.tensor(vpairs, device=uv.device)
     uvpairs = uv[vpairs] # V x 2 x 2
@@ -303,7 +303,7 @@ def uvseparation(vs, fs, uv, loss='l1'):
 
     return separation, edgecorrespondences
 
-def uvgradloss(fs, uv, return_edge_correspondence=False, loss='l2'):
+def uvgradloss(vs, fs, uv, return_edge_correspondence=False, loss='l2'):
     """ uv: F x 3 x 2
         vs: V x 3 (original topology)
         fs: F x 3 (original topology) """
@@ -320,15 +320,18 @@ def uvgradloss(fs, uv, return_edge_correspondence=False, loss='l2'):
     edgecorrespondences, facecorrespondences = edge_soup_correspondences(fs.detach().cpu().numpy())
     e1 = []
     e2 = []
+    elens = []
     for k, v in sorted(edgecorrespondences.items()):
         # If only one correspondence, then it is a boundary
         if len(v) == 1:
             continue
         e1.append(uvsoup[list(v[0])])
         e2.append(uvsoup[list(v[1])])
+        elens.append(np.linalg.norm(vs[k[0]] - vs[k[1]]))
 
     ef0 = torch.cat(e1) # E*2 x 2
     ef1 = torch.cat(e2) # E*2 x 2
+    elens = torch.tensor(elens, device=uv.device).reshape(len(elens), 1)
 
     # Debugging: visualize the edge vectors
     # import polyscope as ps
@@ -362,12 +365,12 @@ def uvgradloss(fs, uv, return_edge_correspondence=False, loss='l2'):
     # elens /= torch.max(elens)
 
     if loss == "l1":
-        separation = torch.nn.functional.l1_loss(e0, e1, reduction='none')
+        separation = elens * torch.nn.functional.l1_loss(e0, e1, reduction='none')
     elif loss == 'l2':
-        separation = torch.nn.functional.mse_loss(e0, e1, reduction='none')
+        separation = elens * torch.nn.functional.mse_loss(e0, e1, reduction='none')
     elif loss == 'cosine':
         # Cosine similarity
-        separation = 1 - torch.nn.functional.cosine_similarity(e0, e1, eps=1e-8)
+        separation = elens.squeeze() * (1 - torch.nn.functional.cosine_similarity(e0, e1, eps=1e-8))
 
     if return_edge_correspondence:
         return separation, edgecorrespondences
