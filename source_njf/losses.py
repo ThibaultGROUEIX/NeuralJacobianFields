@@ -494,10 +494,13 @@ def arap(local_tris, faces, param, return_face_energy=True, paramtris=None, reno
     R = torch.matmul(V, U).to(device) # F x 2 x 2
 
     # Sometimes rotation is opposite orientation: just check with determinant and flip
+    # TODO: check if U, V are correct (U should be transposed!!!). Can flip sign of det by flipping sign of last column of V
     baddet = torch.where(torch.det(R) <= 0)[0]
     if len(baddet) > 0:
         U[baddet, 1, :] *= -1
         R = torch.matmul(V, U).to(device)
+
+        assert torch.all(torch.det(R) >= 0)
 
     edge_tmp = torch.stack([e1, e2, e3], dim=2)
     rot_edges = torch.matmul(R, edge_tmp) # F x 2 x 3

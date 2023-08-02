@@ -5,9 +5,12 @@ import os
 import fresnel
 
 def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=2, logger=None,
-            ftoe=None, facecolors = None):
+            ftoe=None, facecolors = None, edges = None, edgecolors = None,
+            cmap = plt.get_cmap("tab20"), edge_cmap=plt.get_cmap("gist_rainbow")):
+    """ edges: E x 2 x 2 array of individiual node positions
+        edgecolors: [0-1] values to query edge_cmap """
     # First center the predicted vertices
-    pred_vertices -= np.mean(pred_vertices, 0, keepdims=True) # Sum batched over faces, vertex dimension
+    # pred_vertices -= np.mean(pred_vertices, 0, keepdims=True) # Sum batched over faces, vertex dimension
     tris = Triangulation(pred_vertices[:, 0], pred_vertices[:, 1], triangles=triangles)
 
     # setup side by side plots
@@ -24,14 +27,14 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
         axs[0].axis('equal')
 
         gt_tris = Triangulation(gt_vertices[:,0], gt_vertices[:,1], triangles)
-        axs[0].triplot(gt_tris, linewidth=0.5)
+        axs[0].triplot(gt_tris, linewidth=0.1)
 
         # plot ours
         axs[1].set_title('Ours')
         axs[1].axis('equal')
         # axs[1].set_axis_off()
 
-        axs[1].triplot(tris, linewidth=0.5)
+        axs[1].triplot(tris, linewidth=0.1)
         plt.axis('off')
         plt.savefig(os.path.join(path, f"{fname}.png"))
         plt.close(fig)
@@ -40,8 +43,15 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
         fig, axs = plt.subplots(figsize=(5, 5))
         # plot ours
         axs.set_title(name)
-        axs.tripcolor(tris, facecolors=facecolors,
-                            linewidth=0.5, edgecolor="black")
+        axs.tripcolor(tris, facecolors=facecolors, cmap=cmap,
+                            linewidth=0.1, edgecolor="black")
+
+        # Plot edges if given
+        if edges is not None:
+            for i, e in enumerate(edges):
+                axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                         color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
         plt.axis('off')
         axs.axis('equal')
         plt.savefig(os.path.join(path, f"{fname}.png"))
@@ -79,7 +89,14 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
                     axs.tripcolor(tris, vtoeloss, cmap=cmap,
-                                linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor='black')
+                                linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor='black')
+
+                    # Plot edges if given
+                    if edges is not None:
+                        for i, e in enumerate(edges):
+                            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                                    color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
                     plt.axis('off')
                     axs.axis("equal")
                     plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)
@@ -89,7 +106,14 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
                     axs.tripcolor(tris, val[:len(triangles)], facecolors=val[:len(triangles)], cmap=cmap,
-                                linewidth=0.5, vmin=cmin, vmax=cmax, edgecolor="black")
+                                linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
+
+                    # Plot edges if given
+                    if edges is not None:
+                        for i, e in enumerate(edges):
+                            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                                    color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
                     plt.axis('off')
                     axs.axis("equal")
                     plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)

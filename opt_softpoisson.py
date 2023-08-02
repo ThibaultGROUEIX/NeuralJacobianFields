@@ -41,13 +41,14 @@ parser.add_argument("--weightloss",
                     action='store_true', default=False)
 parser.add_argument("--seamless",
                     action='store_true', default=False)
-parser.add_argument("--stitchweight", help="assigns a weight to the stitching loss based on the previous loss",
-                    action='store_true', default=False)
+parser.add_argument("--stitchweight", help="methods for weighting the stitching loss (approximates convergence to L0 loss)",
+                    choices={'seploss', 'softweight', 'softweightdetach'}, default=None)
 parser.add_argument("--seplossweight", help="use predicted weights as the seploss delta",
-                    action='store_true', default=False)
+                    choices={'detach', 'opt'}, default=None)
 
 parser.add_argument("--lr", type=float, default=1e-3)
 parser.add_argument("--seplossdelta", type=float, default=0.1)
+parser.add_argument("--cuteps", type=float, default=0.01)
 parser.add_argument("--continuetrain",  action='store_true')
 
 args = parser.parse_args()
@@ -150,44 +151,9 @@ valid_pairs = []
 for ogv, vlist in sorted(vcorrespondences.items()):
     valid_pairs.extend(list(combinations(vlist, 2)))
 
-# If computing edge losses, then need indices into valid pairs which indicate adjacent faces
-if args.edgecutloss:
-    from source_njf.utils import edge_soup_correspondences
-    edgecorrespondences, facecorrespondences = edge_soup_correspondences(ogfaces.detach().cpu().numpy())
-    checkpairs = [set(pair) for pair in valid_pairs]
-
-    # Construct pairs from original topology based on ordering from valid_pairs
-    facepairs = []
-    edgeidxs = []
-    valid_pairs_edges = []
-    for i in range(len(checkpairs)):
-        pair = checkpairs[i]
-        found = False
-        for k, v in edgecorrespondences.items():
-            # Skip boundary edges
-            if len(v) == 2:
-                if pair == set([v[0][0], v[1][0]]) or pair == set([v[0][1], v[1][1]]):
-                    facepairs.append(facecorrespondences[k])
-                    valid_pairs_edges.append(pair)
-                    edgeidxs.append(i)
-                    found = True
-                    break
-
-    # Get edge lengths corresponding to the face pairs
-    # NOTE: Edge lengths are already normalized by the mesh normalization
-    elens = []
-    for fpair in facepairs:
-        founde = None
-        for e in mesh.topology.faces[fpair[0]].adjacentEdges():
-            if e.halfedge.face.index == fpair[1] or e.halfedge.twin.face.index == fpair[1]:
-                founde = e
-                break
-        if not founde:
-            raise ValueError(f"Face pair {fpair} not found in mesh topology!")
-        elens.append(mesh.length(founde))
-    elens = torch.tensor(elens, device=device)
-
-    assert len(elens) == len(edgeidxs), f"Elens must be equal to adjacent ids found in valid pairs! {len(elens)} != {len(edgeidxs)}"
+# Need edge to soup pairs to visualize cuts
+from source_njf.utils import get_edge_pairs
+valid_edge_pairs, valid_edges_to_soup, edgeidxs, elens = get_edge_pairs(mesh, valid_pairs, device=device)
 
 # Initialize random weights
 from source_njf.losses import vertexseparation, symmetricdirichlet, uvgradloss
@@ -271,11 +237,22 @@ else:
                 fcolor_vals=np.arange(len(soupfs)), device="cpu", n_sample=100, width=400, height=400,
                 vmin=0, vmax=len(soupfs), shading=True)
     plot_uv(screendir, f"inituv", inituv.detach().cpu().numpy(),  faces.detach().cpu().numpy(), losses=None,
-            facecolors = np.arange(len(soupfs)))
+            facecolors = np.arange(len(soupfs))/(len(soupfs)-1))
 
 for i in range(starti, args.niters):
     # Weights need to be negative going into laplacian
     cweights = -torch.sigmoid(weights)
+
+    # Update stitch weight
+    if args.stitchweight and i > starti:
+        if args.stitchweight == "seploss":
+            stitchweight = 1/(separationloss.detach() + 1e-12)
+            assert stitchweight.requires_grad == False
+        if args.stitchweight == "softweight":
+            stitchweight = -cweights
+        if args.stitchweight == "softweightdetach":
+            stitchweight = -cweights.detach()
+            assert stitchweight.requires_grad == False
 
     ## Recompute the RHS based on new jacobians
     input = initj.transpose(2, 1).reshape(1, -1, 3) # 1 x F*3 x 3
@@ -331,7 +308,10 @@ for i in range(starti, args.niters):
         if args.seamless:
             if args.seplossweight:
                 # NOTE: Higher weight = we want to stitch more = smaller delta
-                separationloss = (separationloss * separationloss)/(separationloss * separationloss + (1 + cweights.detach()))
+                if args.seplossweight == "detach":
+                    separationloss = (separationloss * separationloss)/(separationloss * separationloss + (1 + cweights.detach()))
+                elif args.seplossweight == "opt":
+                    separationloss = (separationloss * separationloss)/(separationloss * separationloss + (1 + cweights))
             else:
                 separationloss = (separationloss * separationloss)/(separationloss * separationloss + seplossdelta)
 
@@ -405,17 +385,16 @@ for i in range(starti, args.niters):
         lossstr += f"{k}: {v[-1]:0.7f}. "
     print(lossstr)
 
+    # Also print quantile of stitching weights if applicable
+    if args.stitchweight:
+        print(f"Stitching weight quantiles: {np.quantile(stitchweight.detach().cpu().numpy(), [0.1, 0.25, 0.5, 0.75, 0.9])}")
+
     # print(f"Cweights: {-cweights.detach()}")
     # print(f"Weights: {weights.detach()}")
     # print()
 
-    # Update stitch weight
-    if args.stitchweight:
-        stitchweight = 1/(separationloss.detach() + 1e-12)
-        assert stitchweight.requires_grad == False
-
-    # Visualize every 100 epochs
-    if i % 10000 == 0:
+    # Visualize every 1000 epochs
+    if i % 1000 == 0:
         if not cluster:
             ps.init()
             ps.remove_all_structures()
@@ -424,8 +403,33 @@ for i in range(starti, args.niters):
             ps_uv.add_scalar_quantity('corr', np.arange(len(soupfs)), defined_on='faces', enabled=True, cmap='viridis')
             ps.screenshot(os.path.join(framedir, f"uv_{i:06}.png"), transparent_bg=True)
         else:
+            # Get cut edge pairs
+            edges = None
+            edgecolors = None
+
+            if args.vertexseploss:
+                edgestitchcheck = separationloss[edgeidxs].detach().cpu().numpy()
+                cutvidxs = np.where(edgestitchcheck > args.cuteps)[0]
+                cutsoup = [valid_edges_to_soup[vi] for vi in cutvidxs]
+
+                count = 0
+                edgecolors = []
+                edges = []
+                for souppair in cutsoup:
+                    edges.append(full_uvs[list(souppair[0])].detach().cpu().numpy())
+                    edges.append(full_uvs[list(souppair[1])].detach().cpu().numpy())
+                    edgecolors.extend([count, count])
+                    count += 1
+                if len(edges) > 0:
+                    edges = np.stack(edges, axis=0)
+                    edgecolors = np.array(edgecolors)/np.max(edgecolors)
+
             plot_uv(framedir, f"uv_{i:06}", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(), losses=None,
-                    facecolors = np.arange(len(soupfs)))
+                    facecolors = np.arange(len(soupfs))/(len(soupfs)-1), edges=edges, edgecolors=edgecolors)
+
+
+            # TODO: plot cuts on original mesh (based on cutvidxs) -- plot soup version of 3D mesh using export_views
+
 
         # Save most recent stuffs
         torch.save(weights.detach().cpu(), os.path.join(screendir, "weights.pt"))
@@ -433,6 +437,17 @@ for i in range(starti, args.niters):
 
         if args.stitchweight:
             torch.save(stitchweight.detach().cpu(), os.path.join(screendir, "stitchweight.pt"))
+
+            # Plot stitch weight as histogram
+            import matplotlib.pyplot as plt
+            fig, axs = plt.subplots()
+            # plot ours
+            axs.set_title(f"{i:06}: Stitch Weights")
+            axs.hist(stitchweight.detach().cpu().numpy(), bins=20)
+            plt.savefig(os.path.join(framedir, f"sweight_{i:06}.png"))
+            plt.close(fig)
+            plt.cla()
+
 
         with open(os.path.join(screendir, "epoch.pkl"), 'wb') as f:
             pickle.dump(i, f)
@@ -456,10 +471,39 @@ np.save(os.path.join(screendir, "uv.npy"), full_uvs.detach().cpu().numpy())
 np.save(os.path.join(screendir, "weights.npy"), weights.detach().cpu().numpy())
 np.save(os.path.join(screendir, "targetjacobians.npy"), initj.detach().cpu().numpy())
 np.save(os.path.join(screendir, "poisjacobians.npy"), poisj.detach().cpu().numpy())
+np.save(os.path.join(screendir, "stitchweight.npy"), stitchweight.detach().cpu().numpy())
 
 # Plot final UVs
-plot_uv(screendir, f"finaluv", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(), losses=None,
-                    facecolors = np.arange(len(soupfs)))
+# Get cut edge pairs
+edges = None
+edgecolors = None
+if args.vertexseploss:
+    edgestitchcheck = separationloss[edgeidxs]
+    cutvidxs = torch.where(edgestitchcheck > args.cuteps)[0].detach().cpu().numpy()
+    cutsoup = [valid_edges_to_soup[vi] for vi in cutvidxs]
+
+    count = 0
+    edgecolors = []
+    edges = []
+    for souppair in cutsoup:
+        edges.append(full_uvs[list(souppair[0])].detach().cpu().numpy())
+        edges.append(full_uvs[list(souppair[1])].detach().cpu().numpy())
+        edgecolors.extend([count, count])
+        count += 1
+    if len(edges) > 0:
+        edges = np.stack(edges, axis=0)
+        edgecolors = np.array(edgecolors)/np.max(edgecolors)
+
+# Show flipped triangles
+from source_njf.utils import get_flipped_triangles
+flipped = get_flipped_triangles(full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy())
+flipvals = np.zeros(len(soupfs))
+flipvals[flipped] = 1
+lossdict = {'fliploss': flipvals}
+
+plot_uv(screendir, f"finaluv", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(),
+                    facecolors = np.arange(len(soupfs))/(len(soupfs)-1), edges=edges, edgecolors=edgecolors,
+                    losses=lossdict)
 
 # Final losses
 import matplotlib.pyplot as plt
@@ -467,6 +511,7 @@ from matplotlib.tri import Triangulation
 
 finaluvs = full_uvs.detach().cpu().numpy()
 tris = Triangulation(finaluvs[:, 0], finaluvs[:, 1], triangles=soupfs.detach().cpu().numpy())
+edge_cmap=plt.get_cmap("gist_rainbow")
 
 if args.vertexseploss:
     fig, axs = plt.subplots()
@@ -486,7 +531,7 @@ if args.vertexseploss:
     vlosses = defaultdict(np.double)
     vlosscount = defaultdict(int)
     for i in range(len(valid_pairs)):
-        pair = valid_pairs
+        pair = valid_pairs[i]
         vlosses[pair[0]] += separationloss[i]
         vlosses[pair[1]] += separationloss[i]
         vlosscount[pair[0]] += 1
@@ -499,6 +544,13 @@ if args.vertexseploss:
 
     axs.tripcolor(tris, vseplosses, cmap=cmap, shading='gouraud',
                     linewidth=0.5, vmin=0, vmax=0.5, edgecolor='black')
+
+    # Plot edges if given
+    if edges is not None:
+        for i, e in enumerate(edges):
+            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                        color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
     plt.axis('off')
     axs.axis("equal")
     plt.savefig(os.path.join(screendir, f"finaluv_vertexseploss.png"), bbox_inches='tight', dpi=600)
@@ -511,6 +563,13 @@ if args.symmetricdirichletloss:
     cmap = plt.get_cmap("Reds")
     axs.tripcolor(tris, distortionloss, facecolors=distortionloss, cmap=cmap,
                 linewidth=0.5, vmin=0, vmax=1, edgecolor="black")
+
+    # Plot edges if given
+    if edges is not None:
+        for i, e in enumerate(edges):
+            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                        color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
     plt.axis('off')
     axs.axis("equal")
     plt.savefig(os.path.join(screendir, f"finaluv_distortionloss.png"), bbox_inches='tight', dpi=600)
@@ -527,3 +586,13 @@ imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 # Resize images
 imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
         save_all=True, duration=20, loop=0, disposal=2)
+
+# GIF for stitch weights if given
+if args.stitchweight:
+    fp_in = f"{framedir}/sweight_*.png"
+    fp_out = f"{screendir}/stitchweight.gif"
+    imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+
+    # Resize images
+    imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+            save_all=True, duration=20, loop=0, disposal=2)

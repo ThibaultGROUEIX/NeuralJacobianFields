@@ -1059,6 +1059,50 @@ def vertex_soup_correspondences(fs):
 
     return vcorrespondence
 
+## From a given topology with soup pairs, get only the pairs which correspond to valid edges (i.e. incident to edges which are shared between faces)
+## Returns the valid pairs, the corresponding indices (into the original pair array), and the corresponding edges lengths
+# TODO: also need to return the corresponding edges (two vertex pair indices into the soup vertex array)
+def get_edge_pairs(mesh, valid_pairs, device=torch.device('cpu')):
+    edgecorrespondences, facecorrespondences = edge_soup_correspondences(mesh.faces)
+    checkpairs = [set(pair) for pair in valid_pairs]
+
+    # Construct pairs from original topology based on ordering from valid_pairs
+    facepairs = []
+    edgeidxs = []
+    valid_pairs_edges = []
+    valid_pairs_to_soup_edges = []
+    for i in range(len(checkpairs)):
+        pair = checkpairs[i]
+        found = False
+        for k, v in edgecorrespondences.items():
+            # Skip boundary edges
+            if len(v) == 2:
+                if pair == set([v[0][0], v[1][0]]) or pair == set([v[0][1], v[1][1]]):
+                    facepairs.append(facecorrespondences[k])
+                    valid_pairs_to_soup_edges.append(v)
+                    valid_pairs_edges.append(pair)
+                    edgeidxs.append(i)
+                    found = True
+                    break
+
+    # Get edge lengths corresponding to the face pairs
+    # NOTE: Edge lengths are already normalized by the mesh normalization
+    elens = []
+    for fpair in facepairs:
+        founde = None
+        for e in mesh.topology.faces[fpair[0]].adjacentEdges():
+            if e.halfedge.face.index == fpair[1] or e.halfedge.twin.face.index == fpair[1]:
+                founde = e
+                break
+        if not founde:
+            raise ValueError(f"Face pair {fpair} not found in mesh topology!")
+        elens.append(mesh.length(founde))
+    elens = torch.tensor(elens, device=device)
+
+    assert len(elens) == len(edgeidxs), f"Elens must be equal to adjacent ids found in valid pairs! {len(elens)} != {len(edgeidxs)}"
+
+    return valid_pairs_edges, valid_pairs_to_soup_edges, edgeidxs, elens
+
 class FourierFeatureTransform(torch.nn.Module):
     """
     An implementation of Gaussian Fourier feature mapping.
@@ -1114,7 +1158,7 @@ def signed_volume(v, f):
     return volume
 
 def get_flipped_triangles(vertices, faces):
-    """ Given 2D vertices, and set of new 2D vertices, find triangles that have flipped orientation """
+    """ Given set of 2D vertices, find triangles that have flipped orientation -- i.e. negative determinant """
     # For each original 3D triangle, compute the normal
     from meshing.mesh import Mesh
     from meshing.analysis import computeFaceNormals
