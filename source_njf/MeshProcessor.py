@@ -26,7 +26,8 @@ class MeshProcessor:
     '''
     def __init__(self, vertices, faces, ttype, source_dir=None,from_file = False,
                  cpuonly=False, load_wks_samples=False, load_wks_centroids=False,
-                compute_splu=True, load_splu=False, top_k_eig=50):
+                compute_splu=True, load_splu=False, top_k_eig=50, softpoisson=False,
+                sparse = True):
         '''
         :param vertices:
         :param faces:
@@ -68,16 +69,21 @@ class MeshProcessor:
         self.compute_splu = compute_splu
         self.load_splu = load_splu
         self.top_k_eig = top_k_eig
+        self.softpoisson = softpoisson
+        self.sparse = sparse
 
     @staticmethod
-    def meshprocessor_from_directory(source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False, top_k_eig=50):
+    def meshprocessor_from_directory(source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False,
+                                     top_k_eig=50, softpoisson=False, sparse=True):
         vertices = np.load(os.path.join(source_dir, "vertices.npy"))
         faces = np.load(os.path.join(source_dir, "faces.npy"))
         return MeshProcessor(vertices,faces,ttype,source_dir, cpuonly=cpuonly, load_wks_samples=load_wks_samples,
-                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig)
+                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig,
+                             softpoisson=softpoisson, sparse=sparse)
 
     @staticmethod
-    def meshprocessor_from_file(fname, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False, top_k_eig=50):
+    def meshprocessor_from_file(fname, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False, top_k_eig=50,
+                                softpoisson=False, sparse=True):
         if fname[-4:] == '.obj':
             V, _, _, F, _, _ = igl.read_obj(fname)
         elif fname[-4:] == '.off':
@@ -85,14 +91,15 @@ class MeshProcessor:
         elif fname[-4:] == '.ply':
             V,F = igl.read_triangle_mesh(fname)
         return MeshProcessor(V,F,ttype,os.path.dirname(fname),True, cpuonly=cpuonly, load_wks_samples=load_wks_samples,
-                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig)
+                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig,
+                             softpoisson=softpoisson, sparse=sparse)
 
     @staticmethod
-    def meshprocessor_from_array(vertices, faces, source_dir, ttype, cpuonly=False, load_wks_samples=False, load_wks_centroids=False, top_k_eig=50):
+    def meshprocessor_from_array(vertices, faces, source_dir, ttype, cpuonly=False, load_wks_samples=False,
+                                 load_wks_centroids=False, top_k_eig=50, softpoisson=False, sparse=True):
         return MeshProcessor(vertices,faces,ttype,source_dir, cpuonly=cpuonly, load_wks_samples=load_wks_samples,
-                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig)
-
-
+                             load_wks_centroids=load_wks_centroids, compute_splu=False, top_k_eig=top_k_eig,
+                             softpoisson=softpoisson, sparse=sparse)
 
     def get_vertices(self):
         return self.vertices
@@ -191,6 +198,8 @@ class MeshProcessor:
         self.diff_ops.frames = np.load(os.path.join(self.source_dir, 'w.npy'))
         self.diff_ops.laplacian = SparseMat.from_coo(load_npz(os.path.join(self.source_dir, 'laplacian.npz')), ttype=torch.float64)
         self.diff_ops.lap_pinned = np.load(os.path.join(self.source_dir, 'lap_pinned.npy'))
+        self.diff_ops.lap_pinned_cols = np.load(os.path.join(self.source_dir, 'lap_pinned_cols.npy'))
+        self.diff_ops.lap_pinned_rows = np.load(os.path.join(self.source_dir, 'lap_pinned_rows.npy'))
         self.diff_ops.components = np.load(os.path.join(self.source_dir, 'components.npy'))
 
     def save_differential_operators(self):
@@ -199,27 +208,32 @@ class MeshProcessor:
         np.save(os.path.join(self.source_dir, 'w.npy'), self.diff_ops.frames)
         save_npz(os.path.join(self.source_dir, 'laplacian.npz'), self.diff_ops.laplacian.to_coo())
         np.save(os.path.join(self.source_dir, 'lap_pinned.npy'), self.diff_ops.lap_pinned)
+        np.save(os.path.join(self.source_dir, 'lap_pinned_cols.npy'), self.diff_ops.lap_pinned_cols)
+        np.save(os.path.join(self.source_dir, 'lap_pinned_rows.npy'), self.diff_ops.lap_pinned_rows)
         np.save(os.path.join(self.source_dir, 'components.npy'), self.diff_ops.components)
 
     def compute_differential_operators(self):
         '''
         process the given mesh
         '''
-        poisson_sys_mat = poisson_system_matrices_from_mesh(V= self.vertices, F=self.faces,  cpuonly=self.cpuonly)
+        poisson_sys_mat = poisson_system_matrices_from_mesh(V= self.vertices, F=self.faces,  cpuonly=self.cpuonly,
+                                                            softpoisson=self.softpoisson, is_sparse=self.sparse)
         self.diff_ops.grad = poisson_sys_mat.igl_grad
         self.diff_ops.rhs = poisson_sys_mat.rhs
         self.diff_ops.laplacian = poisson_sys_mat.lap
         self.diff_ops.lap_pinned = poisson_sys_mat.lap_pinned
+        self.diff_ops.lap_pinned_rows = poisson_sys_mat.lap_pinned_rows
+        self.diff_ops.lap_pinned_cols = poisson_sys_mat.lap_pinned_cols
         self.diff_ops.components = poisson_sys_mat.components
         self.diff_ops.frames = poisson_sys_mat.w
         self.diff_ops.poisson_sys_mat = poisson_sys_mat
 
-    def compute_poisson(self):
-        poissonsolver = poissonbuilder.compute_poisson_solver_from_laplacian(compute_splu=self.compute_splu)
-        # new_grad = poissonbuilder.get_new_grad() # This is now done in poisson_system_matrices_from_mesh
-        if self.compute_splu:
-            self.diff_ops.splu.L, self.diff_ops.splu.U , self.diff_ops.splu.perm_c , self.diff_ops.splu.perm_r = poissonbuilder.compute_splu()
-        self.diff_ops.frames = poissonbuilder.w
+    # def compute_poisson(self):
+    #     poissonsolver = poissonbuilder.compute_poisson_solver_from_laplacian(compute_splu=self.compute_splu)
+    #     # new_grad = poissonbuilder.get_new_grad() # This is now done in poisson_system_matrices_from_mesh
+    #     if self.compute_splu:
+    #         self.diff_ops.splu.L, self.diff_ops.splu.U , self.diff_ops.splu.perm_c , self.diff_ops.splu.perm_r = poissonbuilder.compute_splu()
+    #     self.diff_ops.frames = poissonbuilder.w
 
 
     def prepare_differential_operators_for_use(self,ttype):
@@ -229,8 +243,13 @@ class MeshProcessor:
             diff_ops.poisson_sys_mat = PoissonSystemMatrices(self.vertices, self.faces, diff_ops.grad, diff_ops.rhs,
                                                              diff_ops.frames, ttype, lap = diff_ops.laplacian,
                                                              lap_pinned=diff_ops.lap_pinned, components=diff_ops.components,
-                                                             cpuonly=self.cpuonly)
+                                                             lap_pinned_cols=diff_ops.lap_pinned_cols,
+                                                             lap_pinned_rows=diff_ops.lap_pinned_rows,
+                                                             soft= self.softpoisson is not None,
+                                                             cpuonly=self.cpuonly,
+                                                             sparse = self.sparse)
 
+        # NOTE: Poisson solver created/assigned here!
         self.diff_ops.poisson_solver = diff_ops.poisson_sys_mat.create_poisson_solver() # call 2
 
     def prepare_temporary_differential_operators(self,ttype):

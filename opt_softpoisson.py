@@ -31,22 +31,28 @@ parser.add_argument("--vertexsepsqrt", help='whether to sqrt the sum of the vert
                     action='store_true', default=False)
 parser.add_argument("--edgegradloss",
                     action='store_true', default=False)
-parser.add_argument("--edgecutloss", type=str, choices={'threshold', 'seamless'}, default=None,
-                    help="threshold=use differentiable threshold, seamless=use seamless l0 to approximate threshold")
+parser.add_argument("--edgecutloss", type=str, choices={'vertexsep', 'seamless'}, default=None,
+                    help="vertexsep=use whatever outputs from vertex separation loss, seamless=use seamless l0 to approximate threshold")
 parser.add_argument("--jmatchloss",
                     action='store_true', default=False)
-parser.add_argument("--symmetricdirichletloss",
-                    action='store_true', default=False)
+parser.add_argument("--distortionloss", type=str, choices={"symmetricdirichlet", "arap"},
+                    default="symmetricdirichlet")
 parser.add_argument("--weightloss",
                     action='store_true', default=False)
 parser.add_argument("--seamless",
                     action='store_true', default=False)
 parser.add_argument("--stitchweight", help="methods for weighting the stitching loss (approximates convergence to L0 loss)",
                     choices={'seploss', 'softweight', 'softweightdetach'}, default=None)
+parser.add_argument("--edgeweight", help="methods for weighting the edge loss",
+                    choices={'seploss', 'softweightdetach'}, default=None)
 parser.add_argument("--seplossweight", help="use predicted weights as the seploss delta",
                     choices={'detach', 'opt'}, default=None)
 
+parser.add_argument("--edgeweightonly", help='optimize only edge weights. other valid pairs default to 0',
+                    action='store_true', default=False)
+
 parser.add_argument("--lr", type=float, default=1e-3)
+parser.add_argument("--edgecutweight", type=float, default=1)
 parser.add_argument("--seplossdelta", type=float, default=0.1)
 parser.add_argument("--cuteps", type=float, default=0.01)
 parser.add_argument("--continuetrain",  action='store_true')
@@ -153,10 +159,10 @@ for ogv, vlist in sorted(vcorrespondences.items()):
 
 # Need edge to soup pairs to visualize cuts
 from source_njf.utils import get_edge_pairs
-valid_edge_pairs, valid_edges_to_soup, edgeidxs, elens = get_edge_pairs(mesh, valid_pairs, device=device)
+valid_edge_pairs, valid_edges_to_soup, edgeidxs, edgededupidxs, edges, elens, facepairs = get_edge_pairs(mesh, valid_pairs, device=device)
 
 # Initialize random weights
-from source_njf.losses import vertexseparation, symmetricdirichlet, uvgradloss
+from source_njf.losses import vertexseparation, symmetricdirichlet, uvgradloss, arap
 from source_njf.utils import get_jacobian_torch, clear_directory
 
 jacweight = 10
@@ -164,6 +170,8 @@ distweight = 1
 sparseweight = 1
 seplossdelta = args.seplossdelta
 weight_idxs = (torch.tensor([pair[0] for pair in valid_pairs]).to(device), torch.tensor([pair[1] for pair in valid_pairs]).to(device))
+if args.edgeweightonly:
+    weight_idxs = (torch.tensor([pair[0] for pair in valid_edge_pairs]).to(device), torch.tensor([pair[1] for pair in valid_edge_pairs]).to(device))
 # weights = (torch.rand(len(weight_idxs[0])) - 0.5) * 4 # -2 to 2
 
 objname = os.path.basename(datadir).split(".")[0]
@@ -202,6 +210,13 @@ if args.continuetrain and os.path.exists(os.path.join(screendir, "weights.pt")) 
             print(e)
             stitchweight = torch.ones(len(weights)).double().to(device)
 
+    if args.edgeweight:
+        try:
+            edgeweight = torch.load(os.path.join(screendir, "edgeweight.pt")).double().to(device)
+        except Exception as e:
+            print(e)
+            edgeweight = torch.ones(len(edgeidxs)).double().to(device)
+
     print(f"\n============ Continuing optimization from epoch {starti} ===========\n")
 else:
     clear_directory(screendir)
@@ -211,6 +226,7 @@ else:
     starti = 0
     lossdict = defaultdict(list)
     stitchweight = torch.ones(len(weights)).double().to(device)
+    edgeweight = torch.ones(len(edgeidxs)).double().to(device)
 
 framedir = os.path.join(screendir, "frames")
 Path(framedir).mkdir(parents=True, exist_ok=True)
@@ -248,11 +264,22 @@ for i in range(starti, args.niters):
         if args.stitchweight == "seploss":
             stitchweight = 1/(separationloss.detach() + 1e-12)
             assert stitchweight.requires_grad == False
-        if args.stitchweight == "softweight":
+        elif args.stitchweight == "softweight":
             stitchweight = -cweights
-        if args.stitchweight == "softweightdetach":
+        elif args.stitchweight == "softweightdetach":
             stitchweight = -cweights.detach()
             assert stitchweight.requires_grad == False
+
+    if args.edgeweight and i > starti:
+        if args.edgeweight == "seploss":
+            edgeweight = 1/(edgecutloss.detach() + 1e-12)
+            assert edgeweight.requires_grad == False
+        elif args.edgeweight == "softweightdetach":
+            if args.edgeweightonly:
+                edgeweight = -cweights.detach()
+            else:
+                edgeweight = -cweights[edgeidxs].detach()
+            assert edgeweight.requires_grad == False
 
     ## Recompute the RHS based on new jacobians
     input = initj.transpose(2, 1).reshape(1, -1, 3) # 1 x F*3 x 3
@@ -297,69 +324,78 @@ for i in range(starti, args.niters):
     ### Losses
     loss = 0
 
+    # NOTE: Order is wrt weights order (both follow vpairs)
+    separationloss = torch.sum(vertexseparation(ogvertices, ogfaces, full_uvs, loss=args.vertexseptype), dim=1)
+
+    if args.vertexsepsqrt:
+        separationloss = torch.sqrt(separationloss)
+
+    # Continual L0
+    if args.seamless:
+        seamlessloss = (separationloss * separationloss)/(separationloss * separationloss + seplossdelta)
+
+    # Weighted separation loss
     if args.vertexseploss:
-        # NOTE: Order is wrt weights order (both follow vpairs)
-        separationloss = torch.sum(vertexseparation(ogvertices, ogfaces, full_uvs, loss=args.vertexseptype), dim=1)
-
-        if args.vertexsepsqrt:
-            separationloss = torch.sqrt(separationloss)
-
-        # Continual L0
-        if args.seamless:
-            if args.seplossweight:
-                # NOTE: Higher weight = we want to stitch more = smaller delta
-                if args.seplossweight == "detach":
-                    separationloss = (separationloss * separationloss)/(separationloss * separationloss + (1 + cweights.detach()))
-                elif args.seplossweight == "opt":
-                    separationloss = (separationloss * separationloss)/(separationloss * separationloss + (1 + cweights))
-            else:
-                separationloss = (separationloss * separationloss)/(separationloss * separationloss + seplossdelta)
-
-        # Weighted separation loss
         if args.stitchweight:
             # NOTE: Stitch weight is normalized such that sum of separation loss roughly equals 1
-            weightedseparationloss = stitchweight * separationloss
+            if args.seamless:
+                weightedseparationloss = stitchweight * seamlessloss
+            else:
+                weightedseparationloss = stitchweight * separationloss
+
             loss += torch.mean(weightedseparationloss)
             lossdict['Vertex Separation Loss'].append(torch.mean(weightedseparationloss).item())
         else:
-            loss += torch.mean(separationloss)
+            if args.seamless:
+                loss += torch.mean(seamlessloss)
+            else:
+                loss += torch.mean(separationloss)
             lossdict['Vertex Separation Loss'].append(torch.mean(separationloss).item())
 
     if args.edgecutloss:
         if args.edgecutloss == "seamless":
             if args.seamless:
                 # No need to transform separationloss then
-                edgecutloss = separationloss[edgeidxs] * elens
+                edgecutloss = seamlessloss[edgeidxs] * elens * args.edgecutweight
             else:
                 seamlessloss = (separationloss * separationloss)/(separationloss * separationloss + seplossdelta)
-                edgecutloss = seamlessloss[edgeidxs] * elens
-        elif args.edgecutloss == "threshold":
-            raise NotImplementedError("Threshold edge cut loss not implemented")
+                edgecutloss = seamlessloss[edgeidxs] * elens * args.edgecutweight
+        elif args.edgecutloss == "vertexsep":
+            edgecutloss = separationloss[edgeidxs] * elens * args.edgecutweight
+        else:
+            raise NotImplementedError(f"{args.edgecutloss} for edge loss not implemented")
+
+        if args.edgeweight:
+            edgecutloss = edgecutloss * edgeweight
 
         loss += torch.mean(edgecutloss)
         lossdict['Edge Cut Loss'].append(torch.mean(edgecutloss).item())
 
-    if args.edgegradloss:
-        edgegradloss, edgecorrespondences = uvgradloss(ogvertices, ogfaces, full_uvs, return_edge_correspondence=True, loss='l2')
+    # if args.edgegradloss:
+    #     edgegradloss, edgecorrespondences = uvgradloss(ogvertices, ogfaces, full_uvs, return_edge_correspondence=True, loss='l2')
 
-        # Continual L0
-        edgegradloss = (edgegradloss * edgegradloss)/(edgegradloss * edgegradloss + seplossdelta)
-        loss += torch.mean(edgegradloss)
+    #     # Continual L0
+    #     edgegradloss = (edgegradloss * edgegradloss)/(edgegradloss * edgegradloss + seplossdelta)
+    #     loss += torch.mean(edgegradloss)
 
-        lossdict['Edge Gradient Loss'].append(torch.mean(edgegradloss).item())
+    #     lossdict['Edge Gradient Loss'].append(torch.mean(edgegradloss).item())
 
     poisj = get_jacobian_torch(soupvs, soupfs, full_uvs, device=device)
-    if args.jmatchloss:
-        # Jacobian matching loss
-        jacobloss = torch.nn.functional.mse_loss(poisj, initj[:, :2, :].detach(), reduction='none')
-        loss += jacweight * torch.mean(jacobloss)
-        lossdict['Jacobian Matching Loss'].append((jacweight * torch.mean(jacobloss)).item())
+    # if args.jmatchloss:
+    #     # Jacobian matching loss
+    #     jacobloss = torch.nn.functional.mse_loss(poisj, initj[:, :2, :].detach(), reduction='none')
+    #     loss += jacweight * torch.mean(jacobloss)
+    #     lossdict['Jacobian Matching Loss'].append((jacweight * torch.mean(jacobloss)).item())
 
-    if args.symmetricdirichletloss:
+    if args.distortionloss:
         # Distortion loss on poisson solved jacobians
-        distortionloss = symmetricdirichlet(ogvertices, ogfaces, poisj)
+        if args.distortionloss == "symmetricdirichlet":
+            distortionloss = symmetricdirichlet(ogvertices, ogfaces, poisj)
+        if args.distortionloss == "arap":
+            distortionloss = arap(ogvertices, ogfaces, full_uvs, paramtris=full_uvs[soupfs], device=device)
+
         loss += distweight * torch.mean(distortionloss)
-        lossdict['Symmetric Dirichlet Loss'].append((distweight * torch.mean(distortionloss)).item())
+        lossdict['Distortion Loss'].append((distweight * torch.mean(distortionloss)).item())
 
     if args.weightloss:
         # Weight max loss (want to make sum of weights as high as possible (minimize cuts))
@@ -407,29 +443,22 @@ for i in range(starti, args.niters):
             edges = None
             edgecolors = None
 
-            if args.vertexseploss:
-                edgestitchcheck = separationloss[edgeidxs].detach().cpu().numpy()
-                cutvidxs = np.where(edgestitchcheck > args.cuteps)[0]
-                cutsoup = [valid_edges_to_soup[vi] for vi in cutvidxs]
+            edgestitchcheck = separationloss[edgeidxs].detach().cpu().numpy()
+            cutvidxs = np.where(edgestitchcheck > args.cuteps)[0]
+            cutsoup = [valid_edges_to_soup[vi] for vi in cutvidxs]
 
-                count = 0
-                edgecolors = []
-                edges = []
-                for souppair in cutsoup:
-                    edges.append(full_uvs[list(souppair[0])].detach().cpu().numpy())
-                    edges.append(full_uvs[list(souppair[1])].detach().cpu().numpy())
-                    edgecolors.extend([count, count])
-                    count += 1
-                if len(edges) > 0:
-                    edges = np.stack(edges, axis=0)
-                    edgecolors = np.array(edgecolors)/np.max(edgecolors)
+            # TODO: map colors based on cutvidxs instead (fixes the edge correspondences every iter)
+            edgecolors = np.repeat(cutvidxs, 2)/(len(edgestitchcheck)-1)
+            edges = []
+            for souppair in cutsoup:
+                edges.append(full_uvs[list(souppair[0])].detach().cpu().numpy())
+                edges.append(full_uvs[list(souppair[1])].detach().cpu().numpy())
+            if len(edges) > 0:
+                edges = np.stack(edges, axis=0)
+                edgecolors = np.array(edgecolors)/np.max(edgecolors)
 
             plot_uv(framedir, f"uv_{i:06}", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(), losses=None,
                     facecolors = np.arange(len(soupfs))/(len(soupfs)-1), edges=edges, edgecolors=edgecolors)
-
-
-            # TODO: plot cuts on original mesh (based on cutvidxs) -- plot soup version of 3D mesh using export_views
-
 
         # Save most recent stuffs
         torch.save(weights.detach().cpu(), os.path.join(screendir, "weights.pt"))
@@ -439,14 +468,14 @@ for i in range(starti, args.niters):
             torch.save(stitchweight.detach().cpu(), os.path.join(screendir, "stitchweight.pt"))
 
             # Plot stitch weight as histogram
-            import matplotlib.pyplot as plt
-            fig, axs = plt.subplots()
-            # plot ours
-            axs.set_title(f"{i:06}: Stitch Weights")
-            axs.hist(stitchweight.detach().cpu().numpy(), bins=20)
-            plt.savefig(os.path.join(framedir, f"sweight_{i:06}.png"))
-            plt.close(fig)
-            plt.cla()
+            # import matplotlib.pyplot as plt
+            # fig, axs = plt.subplots()
+            # # plot ours
+            # axs.set_title(f"{i:06}: Stitch Weights")
+            # axs.hist(stitchweight.detach().cpu().numpy(), bins=20)
+            # plt.savefig(os.path.join(framedir, f"sweight_{i:06}.png"))
+            # plt.close(fig)
+            # plt.cla()
 
 
         with open(os.path.join(screendir, "epoch.pkl"), 'wb') as f:
@@ -470,29 +499,28 @@ for k, v in lossdict.items():
 np.save(os.path.join(screendir, "uv.npy"), full_uvs.detach().cpu().numpy())
 np.save(os.path.join(screendir, "weights.npy"), weights.detach().cpu().numpy())
 np.save(os.path.join(screendir, "targetjacobians.npy"), initj.detach().cpu().numpy())
-np.save(os.path.join(screendir, "poisjacobians.npy"), poisj.detach().cpu().numpy())
+# np.save(os.path.join(screendir, "poisjacobians.npy"), poisj.detach().cpu().numpy())
 np.save(os.path.join(screendir, "stitchweight.npy"), stitchweight.detach().cpu().numpy())
 
 # Plot final UVs
 # Get cut edge pairs
 edges = None
 edgecolors = None
-if args.vertexseploss:
-    edgestitchcheck = separationloss[edgeidxs]
-    cutvidxs = torch.where(edgestitchcheck > args.cuteps)[0].detach().cpu().numpy()
-    cutsoup = [valid_edges_to_soup[vi] for vi in cutvidxs]
+edgestitchcheck = separationloss[edgeidxs]
+cutvidxs = torch.where(edgestitchcheck > args.cuteps)[0].detach().cpu().numpy()
+cutsoup = [valid_edges_to_soup[vi] for vi in cutvidxs]
 
-    count = 0
-    edgecolors = []
-    edges = []
-    for souppair in cutsoup:
-        edges.append(full_uvs[list(souppair[0])].detach().cpu().numpy())
-        edges.append(full_uvs[list(souppair[1])].detach().cpu().numpy())
-        edgecolors.extend([count, count])
-        count += 1
-    if len(edges) > 0:
-        edges = np.stack(edges, axis=0)
-        edgecolors = np.array(edgecolors)/np.max(edgecolors)
+count = 0
+edgecolors = []
+edges = []
+for souppair in cutsoup:
+    edges.append(full_uvs[list(souppair[0])].detach().cpu().numpy())
+    edges.append(full_uvs[list(souppair[1])].detach().cpu().numpy())
+    edgecolors.extend([count, count])
+    count += 1
+if len(edges) > 0:
+    edges = np.stack(edges, axis=0)
+    edgecolors = np.array(edgecolors)/np.max(edgecolors)
 
 # Show flipped triangles
 from source_njf.utils import get_flipped_triangles
@@ -513,17 +541,53 @@ finaluvs = full_uvs.detach().cpu().numpy()
 tris = Triangulation(finaluvs[:, 0], finaluvs[:, 1], triangles=soupfs.detach().cpu().numpy())
 edge_cmap=plt.get_cmap("gist_rainbow")
 
-if args.vertexseploss:
+# Plot vertex separation no matter what
+assert len(valid_pairs) == len(separationloss), f"Separation loss {len(separationloss)} should have entry for each of {len(valid_pairs)} pairs."
+
+fig, axs = plt.subplots()
+if args.seamless:
+    separationloss = seamlessloss.detach().cpu().numpy()
+else:
+    separationloss = separationloss.detach().cpu().numpy()
+
+fig.suptitle(f"Avg Vertex Loss: {np.mean(separationloss):0.8f}")
+cmap = plt.get_cmap("Reds")
+
+# Convert separation loss to per vertex
+from collections import defaultdict
+vlosses = defaultdict(np.double)
+vlosscount = defaultdict(int)
+for i in range(len(valid_pairs)):
+    pair = valid_pairs[i]
+    vlosses[pair[0]] += separationloss[i]
+    vlosses[pair[1]] += separationloss[i]
+    vlosscount[pair[0]] += 1
+    vlosscount[pair[1]] += 1
+
+# NOTE: Not all vertices will be covered in vlosses b/c they are boundary vertices
+vseplosses = np.zeros(len(finaluvs))
+for k, v in sorted(vlosses.items()):
+    vseplosses[k] = v / vlosscount[k]
+
+axs.tripcolor(tris, vseplosses, cmap=cmap, shading='gouraud',
+                linewidth=0.5, vmin=0, vmax=0.5, edgecolor='black')
+
+# Plot edges if given
+if edges is not None:
+    for i, e in enumerate(edges):
+        axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                    color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
+plt.axis('off')
+axs.axis("equal")
+plt.savefig(os.path.join(screendir, f"finaluv_vertexseploss.png"), bbox_inches='tight', dpi=600)
+plt.close()
+
+if args.vertexseploss and args.stitchweight:
     fig, axs = plt.subplots()
+    weightedseparationloss = weightedseparationloss.detach().cpu().numpy()
 
-    if args.stitchweight:
-        separationloss = weightedseparationloss.detach().cpu().numpy()
-    else:
-        separationloss = separationloss.detach().cpu().numpy()
-
-    assert len(valid_pairs) == len(separationloss), f"Separation loss {len(separationloss)} should have entry for each of {len(valid_pairs)} pairs."
-
-    fig.suptitle(f"Avg Vertex Loss: {np.mean(separationloss):0.8f}")
+    fig.suptitle(f"Avg Vertex Loss: {np.mean(weightedseparationloss):0.8f}")
     cmap = plt.get_cmap("Reds")
 
     # Convert separation loss to per vertex
@@ -532,8 +596,8 @@ if args.vertexseploss:
     vlosscount = defaultdict(int)
     for i in range(len(valid_pairs)):
         pair = valid_pairs[i]
-        vlosses[pair[0]] += separationloss[i]
-        vlosses[pair[1]] += separationloss[i]
+        vlosses[pair[0]] += weightedseparationloss[i]
+        vlosses[pair[1]] += weightedseparationloss[i]
         vlosscount[pair[0]] += 1
         vlosscount[pair[1]] += 1
 
@@ -553,13 +617,13 @@ if args.vertexseploss:
 
     plt.axis('off')
     axs.axis("equal")
-    plt.savefig(os.path.join(screendir, f"finaluv_vertexseploss.png"), bbox_inches='tight', dpi=600)
+    plt.savefig(os.path.join(screendir, f"finaluv_weightedvertexseploss.png"), bbox_inches='tight', dpi=600)
     plt.close()
 
-if args.symmetricdirichletloss:
+if args.distortionloss:
     distortionloss = distortionloss.detach().cpu().numpy()
     fig, axs = plt.subplots(figsize=(5,5))
-    fig.suptitle(f"Avg Distortion Loss: {np.mean(distortionloss):0.8f}")
+    fig.suptitle(f"Avg {args.distortionloss}: {np.mean(distortionloss):0.8f}")
     cmap = plt.get_cmap("Reds")
     axs.tripcolor(tris, distortionloss, facecolors=distortionloss, cmap=cmap,
                 linewidth=0.5, vmin=0, vmax=1, edgecolor="black")
@@ -572,7 +636,7 @@ if args.symmetricdirichletloss:
 
     plt.axis('off')
     axs.axis("equal")
-    plt.savefig(os.path.join(screendir, f"finaluv_distortionloss.png"), bbox_inches='tight', dpi=600)
+    plt.savefig(os.path.join(screendir, f"finaluv_{args.distortionloss}.png"), bbox_inches='tight', dpi=600)
     plt.close()
 
 # Convert screenshots to gif
@@ -588,11 +652,11 @@ imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
         save_all=True, duration=20, loop=0, disposal=2)
 
 # GIF for stitch weights if given
-if args.stitchweight:
-    fp_in = f"{framedir}/sweight_*.png"
-    fp_out = f"{screendir}/stitchweight.gif"
-    imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+# if args.stitchweight:
+#     fp_in = f"{framedir}/sweight_*.png"
+#     fp_out = f"{screendir}/stitchweight.gif"
+#     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
-    # Resize images
-    imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-            save_all=True, duration=20, loop=0, disposal=2)
+#     # Resize images
+#     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+#             save_all=True, duration=20, loop=0, disposal=2)

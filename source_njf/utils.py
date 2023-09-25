@@ -228,90 +228,6 @@ def stitchtopology(vs, fs, edgedist, epsilon=1e-2, return_cut_edges=False, retur
 
     newvs = np.stack(newvs)
 
-    # Keep track of all split correspondences
-    # splitlog = defaultdict(list)
-    # # NOTE: this is same order as export_edge_face_connectivity()
-    # boundarycount = 0
-    # for ei, edge in sorted(ogmesh.topology.edges.items()):
-    #     if edge.onBoundary():
-    #         boundarycount += 1
-    #         continue
-    #     if edgedist[ei - boundarycount] > epsilon: # edgedist removes boundaries
-    #         # New face indices
-    #         replacei = {edge.halfedge.vertex.index: len(ogvs) + len(newvs), edge.halfedge.tip_vertex().index: len(ogvs) + len(newvs) + 1}
-    #         newfi = []
-    #         for v in edge.halfedge.twin.face.adjacentVertices():
-    #             if v.index in replacei.keys():
-    #                 newfi.append(replacei[v.index])
-    #             else:
-    #                 newfi.append(v.index)
-    #         newfi = torch.tensor(newfi).long().to(fs.device)
-    #         newfs[edge.halfedge.twin.face.index] = newfi
-
-    #         # Record in split log
-    #         splitlog[edge.halfedge.vertex.index].append(len(ogvs) + len(newvs))
-    #         splitlog[edge.halfedge.tip_vertex().index].append(len(ogvs) + len(newvs) + 1)
-
-    #         # New vertices (just copy over adjacent)
-    #         newvs.extend([vs[edge.halfedge.vertex.index], vs[edge.halfedge.tip_vertex().index]])
-
-    #         if return_cut_edges:
-    #             cut_es.append(ei)
-
-    #         if return_cut_length:
-    #             cutlen += ogmesh.length(edge)
-    #     else:
-    #         # NOTE: EDGE CASE -- if one of the vertex edges is already new, then need to copy the NEW INDEX OVER
-    #         # Check if one of the adjacent faces has a split vertex
-    #         v1log = splitlog[edge.halfedge.vertex.index]
-    #         v2log = splitlog[edge.halfedge.tip_vertex().index]
-    #         f1 = newfs[edge.halfedge.face.index]
-    #         f2 = newfs[edge.halfedge.twin.face.index]
-
-    #         replacei = {}
-    #         replacef1_count = 0
-    #         for v in f1:
-    #             if v in v1log:
-    #                 replacei[edge.halfedge.vertex.index] = v.item()
-    #                 replacef1_count += 1
-    #             elif v in v2log:
-    #                 replacei[edge.halfedge.tip_vertex().index] = v.item()
-    #                 replacef1_count += 1
-
-    #         replacef2_count = 0
-    #         for v in f2:
-    #             if v in v1log:
-    #                 replacei[edge.halfedge.vertex.index] = v.item()
-    #                 replacef2_count += 1
-    #             elif v in v2log:
-    #                 replacei[edge.halfedge.tip_vertex().index] = v.item()
-    #                 replacef2_count += 1
-
-    #         if len(replacei) > 0:
-    #             # NOTE: Its possible for split vertices to be merged back again
-    #             # Edge case: if there are two replacement vertices, then it is one from each face
-    #             if len(replacei) == 2:
-    #                 assert replacef1_count == 1 and replacef2_count == 1, f"When two split vertices, then must be one from each face."
-    #             else:
-    #                 assert len(replacei) == 1, f"Found more than one split vertex! {replacei}"
-
-    #             newf1 = []
-    #             newf2 = []
-    #             for v in f1:
-    #                 if v.item() in replacei.keys():
-    #                     newf1.append(replacei[v.item()])
-    #                 else:
-    #                     newf1.append(v.item())
-    #             for v in f2:
-    #                 if v.item() in replacei.keys():
-    #                     newf2.append(replacei[v.item()])
-    #                 else:
-    #                     newf2.append(v.item())
-    #             newf1 = torch.tensor(newf1).long().to(fs.device)
-    #             newfs[edge.halfedge.face.index] = newf1
-    #             newf2 = torch.tensor(newf2).long().to(fs.device)
-    #             newfs[edge.halfedge.twin.face.index] = newf2
-
     # Unit tests
     newvs_count = np.sum([1 for group in splitgroups.values() for val in group.values() if len(val) > 0])
     assert newvs_count == len(newvs), f"Split log count: {newvs_count}. # new vs: {len(newvs)}"
@@ -506,6 +422,16 @@ def polyscope_edge_perm(mesh):
     return np.array(edge_p)
 
 # ====================== UV Stuff ========================
+class ZeroNanGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad[grad != grad] = 0
+        return grad
+
 def new_topology_from_cuts(mesh, edgelist):
     """ Given unsorted list of edges to cut, sort the cuts by connections and make cuts """
 
@@ -545,13 +471,18 @@ def generate_random_cuts(mesh, enforce_disk_topo=True, diskmode='SHORTEST', max_
     from meshing.edit import EdgeCut
 
     cutvs = []
-    while max_cuts > 0:
+    while (max_cuts - len(cutvs)) > 0:
         valid = False
+        patience = 10
         while not valid:
             edgei = np.random.randint(0, len(mesh.topology.edges))
             edge = mesh.topology.edges[edgei]
 
+            if patience <= 0:
+                break
+
             if edge.onBoundary():
+                patience -= 1
                 continue
 
             # Having both vertices on boundary is okay as long as they are different boundaries!
@@ -572,7 +503,14 @@ def generate_random_cuts(mesh, enforce_disk_topo=True, diskmode='SHORTEST', max_
             else:
                 valid = True
 
-        # If vertex is starting on boundary, then this is simple cut case
+            if not valid:
+                patience -= 1
+
+        if patience <= 0:
+            print(f"No more valid edges found after 10 samples! {len(cutvs)} cuts generated.")
+            break
+
+        # Having both vertices on boundary is okay as long as they are different boundaries!
         if edge.halfedge.vertex.onBoundary() and edge.halfedge.twin.vertex.onBoundary():
             sourcev = edge.halfedge.vertex.index
             targetv = edge.halfedge.twin.vertex.index
@@ -590,6 +528,7 @@ def generate_random_cuts(mesh, enforce_disk_topo=True, diskmode='SHORTEST', max_
 
             EdgeCut(mesh, edgei, sourcev, cutbdry=True).apply()
 
+        # If vertex is starting on boundary, then this is simple cut case
         elif edge.halfedge.vertex.onBoundary() or edge.halfedge.twin.vertex.onBoundary():
             sourcev = edge.halfedge.vertex.index if edge.halfedge.vertex.onBoundary() else edge.halfedge.twin.vertex.index
             targetv = edge.halfedge.vertex.index if edge.halfedge.twin.vertex.onBoundary() else edge.halfedge.twin.vertex.index
@@ -648,8 +587,6 @@ def generate_random_cuts(mesh, enforce_disk_topo=True, diskmode='SHORTEST', max_
             edge = mesh.topology.edges[e2_i]
 
             EdgeCut(mesh, edgei, sourcev, cutbdry=True, e2_i=e2_i).apply()
-
-        max_cuts -= (len(cut_vs) - 1)
 
     # Check for disk topology condition
     if enforce_disk_topo and not mesh.is_disk_topology():
@@ -1061,38 +998,47 @@ def vertex_soup_correspondences(fs):
 
 ## From a given topology with soup pairs, get only the pairs which correspond to valid edges (i.e. incident to edges which are shared between faces)
 ## Returns the valid pairs, the corresponding indices (into the original pair array), and the corresponding edges lengths
-# TODO: also need to return the corresponding edges (two vertex pair indices into the soup vertex array)
 def get_edge_pairs(mesh, valid_pairs, device=torch.device('cpu')):
+    """ valid_pairs_edges: valid pairs which correspond to edges
+        valid_pairs_to_soup_edges: for each valid pair, gives corresponding soup edge (two pairs of vertex indices).
+        edgeidxs: indexes into the valid pairs array to get the ones corresponding to edges
+        elens: edge lengths of the valid pairs """
     edgecorrespondences, facecorrespondences = edge_soup_correspondences(mesh.faces)
     checkpairs = [set(pair) for pair in valid_pairs]
 
     # Construct pairs from original topology based on ordering from valid_pairs
     facepairs = []
     edgeidxs = []
+    edgededupidxs = []
     valid_pairs_edges = []
     valid_pairs_to_soup_edges = []
     for i in range(len(checkpairs)):
         pair = checkpairs[i]
         found = False
+        ei = 0
         for k, v in edgecorrespondences.items():
             # Skip boundary edges
             if len(v) == 2:
                 if pair == set([v[0][0], v[1][0]]) or pair == set([v[0][1], v[1][1]]):
                     facepairs.append(facecorrespondences[k])
-                    valid_pairs_to_soup_edges.append(v)
-                    valid_pairs_edges.append(pair)
+                    valid_pairs_to_soup_edges.append(v) # NOTE: This will be TWO pairs (one for each edge/soupface)
+                    valid_pairs_edges.append(list(pair))
                     edgeidxs.append(i)
+                    edgededupidxs.append(ei)
                     found = True
                     break
+            ei += 1
 
     # Get edge lengths corresponding to the face pairs
     # NOTE: Edge lengths are already normalized by the mesh normalization
+    edges = []
     elens = []
     for fpair in facepairs:
         founde = None
         for e in mesh.topology.faces[fpair[0]].adjacentEdges():
             if e.halfedge.face.index == fpair[1] or e.halfedge.twin.face.index == fpair[1]:
                 founde = e
+                edges.append(e.index)
                 break
         if not founde:
             raise ValueError(f"Face pair {fpair} not found in mesh topology!")
@@ -1101,7 +1047,7 @@ def get_edge_pairs(mesh, valid_pairs, device=torch.device('cpu')):
 
     assert len(elens) == len(edgeidxs), f"Elens must be equal to adjacent ids found in valid pairs! {len(elens)} != {len(edgeidxs)}"
 
-    return valid_pairs_edges, valid_pairs_to_soup_edges, edgeidxs, elens
+    return valid_pairs_edges, valid_pairs_to_soup_edges, edgeidxs, edgededupidxs, edges, elens, facepairs
 
 class FourierFeatureTransform(torch.nn.Module):
     """

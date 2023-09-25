@@ -36,12 +36,22 @@ def get_arg_parser():
 						type = str, default='outputs')
 
 	### ARCH
+	parser.add_argument('--softpoisson', type=str, choices={'edges', 'valid'}, help="SOFT POISSON", default=None)
+	parser.add_argument('--sparsepoisson', action="store_true")
+	parser.add_argument("--spweight", choices={'sigmoid', 'seamless', 'cosine'}, type=str,
+						help = "how to map dot product to soft poisson weights", default='cosine')
 	parser.add_argument("--fft",
 							help='fourier features',
 							action="store_true")
 	parser.add_argument("--fft_dim", type=int,
 							help='fourier features dimension',
 							default=256)
+	parser.add_argument("--facedim", type=int,
+							help='face latent dimension',
+							default=0)
+	parser.add_argument("--facediminit", type=float,
+							help='value to initialize weights of face latent linear layer',
+							default=None)
 	parser.add_argument("--noencoder", help="no encoder. TURN THIS ON IF YOU DONT WANT TO TRAIN THE ENCODER",action="store_true")
 
 	### TRAINING
@@ -61,6 +71,8 @@ def get_arg_parser():
 	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization. -1 indicates new initialization for EACH load")
 	parser.add_argument("--basistype", choices={"basis", "rot", "global"}, help="how to sample new triangle local basis", default="basis", type=str)
 	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
+							action="store_true")
+	parser.add_argument("--initweightinput", help="use the initialization weights as part of input",
 							action="store_true")
 	parser.add_argument("--noiseiso", help="noise the isometric embedding",
 							action="store_true")
@@ -104,13 +116,47 @@ def get_arg_parser():
 	parser.add_argument("--vertex_loss_weight", help="the weight to place on the vertex loss (jacobian loss is unweighted) default = 1.0", default=1.0, type=float)
 
  	###### POSTPROCESS ######
+	parser.add_argument("--hardpoisson", type=str, choices={'loss', 'weight'}, help = "cutting options for hard poisson",
+						default=None)
+	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
+	parser.add_argument("--weightcuteps", help="epsilon for edge stitching post-process (for pred weights)", default=1e-5, type=float)
+
+
 	parser.add_argument("--opttrans", help = "predict l0 translation and visualize", action="store_true")
+
 	###### LOSSES ######
+	## NEW Stitching loss framework
+	parser.add_argument("--stitchingloss", help = "choice of stitching losses. can use multiple", default=None,
+						type = str, nargs='+',
+						choices={'vertexseploss', 'edgecutloss', 'edgegradloss'})
+	parser.add_argument("--stitchdist", help = "type of stitching distance metric", default='l1', type=str,
+						choices={'l1', 'l2'})
+	parser.add_argument("--stitchweight", choices={'stitchloss', 'softweight', 'softweightdetach'},
+						help = "iterative reweighting of the stitching loss", default=None)
+
+	# Seamless
+	parser.add_argument("--seamlessvertexsep", help = "use counting loss over distortion energy", action="store_true")
+	parser.add_argument("--seamlessedgecut", help = "use counting loss over distortion energy", action="store_true")
+	parser.add_argument("--seamlessgradloss", help = "use counting loss over distortion energy", action="store_true")
+	parser.add_argument("--seamlessdelta", help="initial delta for edge separation loss", default=0.5, type=float)
+
+	# Weights
+	parser.add_argument("--edgegrad_weight", help="loss weight", default=1, type=float)
+	parser.add_argument("--edgecut_weight", help="loss weight", default=1, type=float)
+	parser.add_argument("--vertexsep_weight", help="loss weight", default=1, type=float)
+	parser.add_argument("--distortion_weight", help = "distortion weight", default=1, type=float)
+	parser.add_argument("--sparsecuts_weight", help = "sparse cuts weight", default=1, type=float)
+
+	# Sparse cuts loss
+	parser.add_argument("--sparsecutsloss", help = "use sparse cuts loss", action="store_true")
+
+	## Distortion loss
 	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet', 'edge'})
 	parser.add_argument("--losscount", help = "use counting loss over distortion energy", action="store_true")
+
+	## ELSE
 	parser.add_argument("--lossgradientstitching", choices={'cosine', 'split', 'l2', 'l1'}, help = "use gradient stitching loss", default=None)
 	parser.add_argument("--lossgt", help = "use counting loss over distortion energy", action="store_true")
-	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
 
 	parser.add_argument("--stitchlossweight", help="weight for edge stitching losses", default=1, type=float)
 	parser.add_argument("--stitchlossweight_min", help="max weight for edge stitching losses", default=0, type=float)
@@ -120,10 +166,13 @@ def get_arg_parser():
 
 	parser.add_argument("--lossedgeseparation", help = "use edge separation loss", action="store_true")
 	parser.add_argument("--eseploss", type=str, choices={'l1', 'l2'}, help = "type of regression loss for edge sep", default="l1")
+
+	# NOTE: DEPRECATED
 	parser.add_argument("--seplossdelta", help="initial delta for edge separation loss", default=0.5, type=float)
 	parser.add_argument("--seplossdelta_min", help="min delta for edge separation loss", default=0.01, type=float)
 	parser.add_argument("--seploss_schedule", help="apply linear schedule to the separation loss delta parameter", action="store_true")
 	parser.add_argument("--lossautocut", help = "use counting loss over distortion energy", action="store_true")
+	######
 
 	parser.add_argument("--gpu_strategy",help ="default: no op (whatever lightning does by default). ddp: use the ddp multigpu startegy; spawn: use the ddpspawn strategy",default=None,choices={'ddp','ddpspawn', 'cpuonly'})
 	parser.add_argument("--no_validation",help = "skip validation",action="store_true")

@@ -48,6 +48,9 @@ class Halfedge(Primitive):
 
         i_he, i_vert, i_edge, i_face, i_next, i_twin, is_bound
 
+    # def onBoundary(self):
+    #     return (self.vertex.onBoundary() or self.tip_vertex().onBoundary())
+
 class Edge(Primitive):
     def onBoundary(self):
         return (self.halfedge.onBoundary or self.halfedge.twin.onBoundary)

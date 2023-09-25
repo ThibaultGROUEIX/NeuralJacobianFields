@@ -56,7 +56,8 @@ class DeformationDataset(Dataset):
             # This flag will avoid reloading the source at each iteration, since the source is always the same.
             self.unique_source = True
         self.source_and_target = []
-        # TODO: duplicate source for however many initializations we need
+
+        # NOTE: duplicate source for however many initializations we need
         for s,ts in source_target.items():
             chunks = np.split(ts, np.arange(args.targets_per_batch,len(ts),args.targets_per_batch))
             if args.init == "isometric" and args.ninit > 0:
@@ -76,6 +77,7 @@ class DeformationDataset(Dataset):
         self.source = None
         self.target = None
         self.star_is_initialized = False
+        self.weightsdim = 0
 
         # Store point dimension
         # if args.layer_normalization == "FLATTEN":
@@ -195,7 +197,8 @@ class DeformationDataset(Dataset):
 
         # ==================================================================
         # LOAD TARGET
-        target = BatchOfTargets(target_index, [join(self.directory, 'cache', f"{target_index[i]}_{ind}") for i in range(len(target_index))], self.target_keys, scales[False], self.ttype)
+        target = BatchOfTargets(target_index, [join(self.directory, 'cache', f"{target_index[i]}_{ind}") for i in range(len(target_index))], self.target_keys, scales[False], self.ttype,
+                                sparse = self.args.sparsepoisson)
         target.load()
         return source, target
 
@@ -239,6 +242,15 @@ class DeformationDataset(Dataset):
             print(f"DATALOADER : loaded sample in {time.time() - start}")
 
         return data_sample
+
+    def get_weights_dim(self):
+        maxedgelen = 0
+        for i, pair in enumerate(self):
+            train_source, train_target = pair
+            if len(train_source.valid_edge_pairs) > maxedgelen:
+                maxedgelen = len(train_source.valid_edge_pairs)
+        self.weightsdim = maxedgelen
+
     def get_point_dim(self):
         return self[0][0].get_point_dim()
 

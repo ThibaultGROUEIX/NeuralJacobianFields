@@ -12,7 +12,7 @@ import numpy as np
 import sys
 import random
 import time
-from utils import FourierFeatureTransform
+from utils import FourierFeatureTransform, get_jacobian_torch
 
 class SourceMesh:
     '''
@@ -57,14 +57,16 @@ class SourceMesh:
             # Initialize fourier features transform
             self.fft = FourierFeatureTransform(n_input, fft_dim)
 
+        self.initweights = None
+
     def get_vertices(self):
         return self.source_vertices
 
     def get_global_translation_to_original(self):
         return self.__source_global_translation_to_original
 
-    def vertices_from_jacobians(self, d):
-        return self.poisson.solve_poisson(d)
+    def vertices_from_jacobians(self, d, updatedlap=False):
+        return self.poisson.solve_poisson(d, updatedlap=updatedlap)
 
     def jacobians_from_vertices(self, v):
         return self.poisson.jacobians_from_vertices(v)
@@ -152,17 +154,84 @@ class SourceMesh:
         # First check if initialization cached
         # TODO: Isometric initialization with curriculum learning (only sample limited range of rotations)
 
+        ## Precompute edge lengths and edgeidxs
+        # TODO: CACHE
+        from source_njf.utils import get_edge_pairs, vertex_soup_correspondences, edge_soup_correspondences
+        from itertools import combinations
+
+        vertices = self.source_vertices
+        device = vertices.device
+        faces = self.get_source_triangles()
+
+        # Reset cut topo to original topo
+        self.cutvs = vertices.detach().cpu().numpy()
+        self.cutfs = faces
+
+        mesh = Mesh(vertices.detach().cpu().numpy(), faces)
+        ogvs, ogfs, oges = mesh.export_soup()
+
+        vcorrespondences = vertex_soup_correspondences(faces)
+        valid_pairs = []
+        for ogv, vlist in sorted(vcorrespondences.items()):
+            valid_pairs.extend(list(combinations(vlist, 2)))
+        self.valid_pairs = valid_pairs
+
+        # Get face pairs for all corresponding valid pairs
+        self.allfacepairs = []
+        for pair in valid_pairs:
+            self.allfacepairs.append([pair[0] // 3, pair[1] // 3])
+
+        # There should be no self-pairs
+        for pair in self.allfacepairs:
+            assert pair[0] != pair[1], f"Self-pair found: {pair}"
+
+        self.valid_edge_pairs, self.valid_edges_to_soup, self.edgeidxs, self.edgededupidxs, self.edges, self.elens, self.facepairs = get_edge_pairs(mesh, valid_pairs, device=device)
+
+        ### NOTE: BASE WEIGHTS INITIALIZED HERE
+        if self.args.softpoisson == "edges":
+            if self.args.spweight == "sigmoid":
+                self.initweights = torch.ones(len(self.valid_edge_pairs), device=device).float() * -10
+            elif self.args.spweight in ["seamless", 'cosine']:
+                self.initweights = torch.zeros(len(self.valid_edge_pairs), device=device).float()
+            else:
+                raise NotImplementedError(f"Soft poisson weight {self.args.spweight} not implemented!")
+        else:
+            if self.args.spweight == "sigmoid":
+                self.initweights = torch.ones(len(self.valid_pairs), device=device).float() * -10
+            elif self.args.spweight in ["seamless", 'cosine']:
+                self.initweights = torch.zeros(len(self.valid_pairs), device=device).float()
+            else:
+                raise NotImplementedError(f"Soft poisson weight {self.args.spweight} not implemented!")
+        ####
+
+        # Convert edge pairs to tensor
+        self.valid_pairs = torch.tensor([list(pair) for pair in self.valid_pairs], device=device)
+        self.valid_edge_pairs = torch.tensor([list(pair) for pair in self.valid_edge_pairs], device=device)
+        self.facepairs = torch.tensor(self.facepairs, device=device)
+        self.allfacepairs = torch.tensor(self.allfacepairs, device=device)
+        self.elens = self.elens.to(device)
+        self.edges = np.array(self.edges)
+
+        # Edge correspondences
+        self.edgecorrespondences, self.facecorrespondences = edge_soup_correspondences(faces)
+
+        self.__loaded_data['valid_edge_pairs'] = self.valid_edge_pairs
+        self.__loaded_data['facepairs'] = self.facepairs
+        self.__loaded_data['elens'] = self.elens
+
         # Precompute Tutte if set
         if self.init == "tutte":
             if os.path.exists(os.path.join(self.source_dir, "tuttefuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "tutteuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "tuttej.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "tuttetranslate.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt")) and \
                     not new_init:
                 self.tuttefuv = torch.load(os.path.join(self.source_dir, "tuttefuv.pt"))
                 self.tutteuv = torch.load(os.path.join(self.source_dir, "tutteuv.pt"))
                 self.tuttej = torch.load(os.path.join(self.source_dir, "tuttej.pt"))
                 self.tuttetranslate = torch.load(os.path.join(self.source_dir, "tuttetranslate.pt"))
+                self.initweights = torch.load(os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt"))
             else:
                 from utils import tutte_embedding, get_local_tris, generate_random_cuts
 
@@ -200,17 +269,14 @@ class SourceMesh:
                         self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
 
                         # Get Jacobians
-                        meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(vs, fs, self.source_dir, self._SourceMesh__ttype, cpuonly=self.cpuonly, load_wks_samples=self._SourceMesh__use_wks, load_wks_centroids=self._SourceMesh__use_wks)
-                        meshprocessor.prepare_temporary_differential_operators(self._SourceMesh__ttype)
-                        poissonsolver = meshprocessor.diff_ops.poisson_solver
-
-                        # NOTE: We have NaNs here!!
-                        self.tuttej = poissonsolver.jacobians_from_vertices(self.tutteuv) # F x 3 x 3
+                        self.tuttej = get_jacobian_torch(torch.from_numpy(vs), torch.from_numpy(fs), self.tutteuv.squeeze()[:,:2], device=device) # F x 2 x 3
+                        self.tuttej = torch.cat([self.tuttej, torch.zeros(self.tuttej.shape[0], 1, self.tuttej.shape[2])], dim=1)
 
                         if torch.any(~torch.isfinite(self.tuttej)):
                             print("Tutte Jacobians have NaNs!")
                         else:
                             set_new_tutte = True
+
                     # Otherwise, just use the default Tutte
                     if not set_new_tutte:
                         self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x V x 2
@@ -219,19 +285,40 @@ class SourceMesh:
                         self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
 
                         # Get Jacobians
-                        self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
+                        self.tuttej = get_jacobian_torch(vertices, faces, self.tutteuv.squeeze()[:,:2], device=device) # F x 2 x 3
+                        self.tuttej = torch.cat([self.tuttej, torch.zeros(self.tuttej.shape[0], 1, self.tuttej.shape[2])], dim=1)
 
                         # Reset cut topo to original topo
                         self.cutvs = vertices.detach().cpu().numpy()
                         self.cutfs = faces.detach().numpy()
+                    ### Set initialization weights here based on the cuts
+                    else:
+                        newvcorrespondences = vertex_soup_correspondences(self.cutfs)
+                        new_valid_pairs = []
+                        for ogv, vlist in sorted(newvcorrespondences.items()):
+                            new_valid_pairs.extend(list(combinations(vlist, 2)))
+                        new_valid_pairs = [set(pair) for pair in new_valid_pairs]
+
+                        if self.args.softpoisson == "edges":
+                            checkvalid = [set(pair) for pair in self.valid_edge_pairs.cpu().numpy()]
+                        else:
+                            checkvalid = [set(pair) for pair in self.valid_pairs.cpu().numpy()]
+
+                        for i in range(len(checkvalid)):
+                            if checkvalid[i] in new_valid_pairs:
+                                if self.args.spweight == "sigmoid":
+                                    self.initweights[i] = 0 # Maps to 0.5
+                                elif self.args.spweight in ["seamless", "cosine"]:
+                                    self.initweights[i] = 0.5
                 else:
                     self.tutteuv = torch.from_numpy(tutte_embedding(vertices.detach().cpu().numpy(), faces.detach().numpy())).unsqueeze(0) # 1 x V x 2
 
+                    # Get Jacobians
+                    self.tuttej = get_jacobian_torch(vertices, faces, self.tutteuv.squeeze()[:,:2], device=device) # F x 2 x 3
+                    self.tuttej = torch.cat([self.tuttej, torch.zeros(self.tuttej.shape[0], 1, self.tuttej.shape[2])], dim=1)
+
                     # Convert Tutte to 3-dim
                     self.tutteuv = torch.cat([self.tutteuv, torch.zeros(self.tutteuv.shape[0], self.tutteuv.shape[1], 1)], dim=-1)
-
-                    # Get Jacobians
-                    self.tuttej = self.jacobians_from_vertices(self.tutteuv) #  F x 3 x 3
 
                     # Reset cut topo to original topo
                     self.cutvs = vertices.detach().cpu().numpy()
@@ -241,7 +328,7 @@ class SourceMesh:
                 # NOTE: We compare triangle centroids bc face indexing gets messed up after cutting
                 fverts = torch.from_numpy(ogvs[ogfs])
                 # pred_V = torch.einsum("abc,acd->abd", (self.tuttej[0,:,:2,:], fverts)).transpose(1,2)
-                pred_V = torch.einsum("abc,acd->abd", (fverts, self.tuttej[0,:,:2,:].transpose(2,1)))
+                pred_V = torch.einsum("abc,acd->abd", (fverts, self.tuttej[:,:2,:].transpose(2,1)))
 
                 if new_init and self.init == "tutte" and set_new_tutte:
                     checktutte = self.tutteuv[0,fs,:2]
@@ -251,8 +338,8 @@ class SourceMesh:
                     self.tuttefuv = self.tutteuv[:,faces,:2] # B x F x 3 x 2
 
                 # diff = pred_V - checktutte
-                # diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
-                # torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+                # diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle global translation
+                # torch.testing.assert_allclose(diff.float(), torch.zeros_like(diff), rtol=1e-4, atol=1e-4)
 
                 ## Save the global translations
                 self.tuttetranslate = (checktutte - pred_V)[:,:,:2]
@@ -260,18 +347,20 @@ class SourceMesh:
                 ## Compute ground truth if set
                 if self.args.lossgt:
                     from numpy.linalg import pinv
-                    invJ = pinv(self.tuttej.detach().cpu().numpy()[:,:,:2,:]) # 1 x F x 3 x 2
+                    invJ = pinv(self.tuttej.detach().cpu().numpy()[:,:2,:]) # F x 3 x 2
                     self.gtJ = torch.from_numpy(gtJ @ invJ) # 1 x F x 2 x 2
                     checkJ = self.gtJ @ self.tuttej[:,:,:2,:]
                     # np.testing.assert_allclose(checkJ, gtJ, atol=1e-5, rtol=1e-5)
 
                     torch.save(self.gtJ, os.path.join(self.source_dir, "tmpgtJ.pt"))
 
-                # Cache everything
-                torch.save(self.tuttefuv, os.path.join(self.source_dir, "tuttefuv.pt"))
-                torch.save(self.tutteuv, os.path.join(self.source_dir, "tutteuv.pt"))
-                torch.save(self.tuttej, os.path.join(self.source_dir, "tuttej.pt"))
-                torch.save(self.tuttetranslate, os.path.join(self.source_dir, "tuttetranslate.pt"))
+                # Cache everything (only if NOT new init)
+                if not new_init:
+                    torch.save(self.tuttefuv, os.path.join(self.source_dir, "tuttefuv.pt"))
+                    torch.save(self.tutteuv, os.path.join(self.source_dir, "tutteuv.pt"))
+                    torch.save(self.tuttej, os.path.join(self.source_dir, "tuttej.pt"))
+                    torch.save(self.tuttetranslate, os.path.join(self.source_dir, "tuttetranslate.pt"))
+                    torch.save(self.initweights, os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt"))
 
             ## Store in loaded data so it gets mapped to device
             # Remove extraneous dimension
@@ -279,6 +368,7 @@ class SourceMesh:
             self.__loaded_data['tutteuv'] = self.tutteuv
             self.__loaded_data['tuttej'] = self.tuttej
             self.__loaded_data['tuttetranslate'] = self.tuttetranslate
+            self.__loaded_data['initweights'] = self.initweights
             if self.args.lossgt:
                 self.__loaded_data['gtJ'] = self.gtJ
 
@@ -301,11 +391,13 @@ class SourceMesh:
                 os.path.exists(os.path.join(self.source_dir, "slimuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "slimj.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "slimtranslate.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, f"sliminitweights_{self.args.softpoisson}.pt")) and \
                     not new_init:
                 self.slimfuv = torch.load(os.path.join(self.source_dir, "slimfuv.pt"))
                 self.slimuv = torch.load(os.path.join(self.source_dir, "slimuv.pt"))
                 self.slimj = torch.load(os.path.join(self.source_dir, "slimj.pt"))
                 self.slimtranslate = torch.load(os.path.join(self.source_dir, "slimtranslate.pt"))
+                self.initweights = torch.load(os.path.join(self.source_dir, f"sliminitweights_{self.args.softpoisson}.pt"))
             else:
                 from utils import SLIM, get_local_tris, generate_random_cuts
 
@@ -345,12 +437,8 @@ class SourceMesh:
                         self.slimuv = torch.cat([self.slimuv, torch.zeros(self.slimuv.shape[0], self.slimuv.shape[1], 1)], dim=-1)
 
                         # Get Jacobians
-                        meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(vs, fs, self.source_dir, self._SourceMesh__ttype, cpuonly=self.cpuonly, load_wks_samples=self._SourceMesh__use_wks, load_wks_centroids=self._SourceMesh__use_wks)
-                        meshprocessor.prepare_temporary_differential_operators(self._SourceMesh__ttype)
-                        poissonsolver = meshprocessor.diff_ops.poisson_solver
-
-                        # NOTE: We sometimes have NaNs here!!
-                        self.slimj = poissonsolver.jacobians_from_vertices(self.slimuv) # F x 3 x 3
+                        self.slimj = get_jacobian_torch(torch.from_numpy(self.cutvs), torch.from_numpy(self.cutfs), self.slimuv.squeeze()[:,:2], device=device) # F x 2 x 3
+                        self.slimj = torch.cat([self.slimj, torch.zeros(self.slimj.shape[0], 1, self.slimj.shape[2])], dim=1)
 
                         if torch.any(~torch.isfinite(self.slimj)):
                             print("SLIM Jacobians have NaNs!")
@@ -364,19 +452,39 @@ class SourceMesh:
                         self.slimuv = torch.cat([self.slimuv, torch.zeros(self.slimuv.shape[0], self.slimuv.shape[1], 1)], dim=-1)
 
                         # Get Jacobians
-                        self.slimj = self.jacobians_from_vertices(self.slimuv) #  F x 3 x 3
+                        self.slimj = get_jacobian_torch(vertices, faces, self.slimuv.squeeze()[:,:2], device=device) # F x 2 x 3
+                        self.slimj = torch.cat([self.slimj, torch.zeros(self.slimj.shape[0], 1, self.slimj.shape[2])], dim=1)
 
                         # Reset cut topo to original topo
                         self.cutvs = vertices.detach().cpu().numpy()
                         self.cutfs = faces.detach().numpy()
+                    else:
+                        newvcorrespondences = vertex_soup_correspondences(self.cutfs)
+                        new_valid_pairs = []
+                        for ogv, vlist in sorted(newvcorrespondences.items()):
+                            new_valid_pairs.extend(list(combinations(vlist, 2)))
+                        new_valid_pairs = [set(pair) for pair in new_valid_pairs]
+
+                        if self.args.softpoisson == "edges":
+                            checkvalid = [set(pair) for pair in self.valid_edge_pairs.cpu().numpy()]
+                        else:
+                            checkvalid = [set(pair) for pair in self.valid_pairs.cpu().numpy()]
+
+                        for i in range(len(checkvalid)):
+                            if checkvalid[i] in new_valid_pairs:
+                                if self.args.spweight == "sigmoid":
+                                    self.initweights[i] = 0 # Maps to 0.5
+                                elif self.args.spweight in ["seamless", 'cosine']:
+                                    self.initweights[i] = 0.5
                 else:
                     self.slimuv = torch.from_numpy(SLIM(ogmesh, iters=self.args.slimiters)[0]).unsqueeze(0) # 1 x V x 2
 
+                    # Get Jacobians
+                    self.slimj = get_jacobian_torch(vertices, faces, self.slimuv.squeeze()[:,:2], device=device) # F x 2 x 3
+                    self.slimj = torch.cat([self.slimj, torch.zeros(self.slimj.shape[0], 1, self.slimj.shape[2])], dim=1)
+
                     # Convert slim to 3-dim
                     self.slimuv = torch.cat([self.slimuv, torch.zeros(self.slimuv.shape[0], self.slimuv.shape[1], 1)], dim=-1)
-
-                    # Get Jacobians
-                    self.slimj = self.jacobians_from_vertices(self.slimuv) #  F x 3 x 3
 
                     # Reset cut topo to original topo
                     self.cutvs = vertices.detach().cpu().numpy()
@@ -386,7 +494,7 @@ class SourceMesh:
                 # NOTE: We compare triangle centroids bc face indexing gets messed up after cutting
                 fverts = torch.from_numpy(ogvs[ogfs])
                 # pred_V = torch.einsum("abc,acd->abd", (self.slimj[0,:,:2,:], fverts)).transpose(1,2)
-                pred_V = torch.einsum("abc,acd->abd", (fverts, self.slimj[0,:,:2,:].transpose(2,1)))
+                pred_V = torch.einsum("abc,acd->abd", (fverts, self.slimj[:,:2,:].transpose(2,1)))
 
                 if new_init and self.init == "slim" and set_new_slim:
                     checkslim = self.slimuv[0,fs,:2]
@@ -405,18 +513,20 @@ class SourceMesh:
                 ## Compute ground truth if set
                 if self.args.lossgt:
                     from numpy.linalg import pinv
-                    invJ = pinv(self.slimj.detach().cpu().numpy()[:,:,:2,:]) # F x 3 x 2
+                    invJ = pinv(self.slimj.detach().cpu().numpy()[:,:2,:]) # F x 3 x 2
                     self.gtJ = torch.from_numpy(gtJ @ invJ) # F x 2 x 2
-                    checkJ = self.gtJ @ self.slimj[:,:,:2,:]
+                    checkJ = self.gtJ @ self.slimj[:,:2,:]
                     # np.testing.assert_allclose(checkJ, gtJ, atol=1e-5, rtol=1e-5)
 
                     torch.save(self.gtJ, os.path.join(self.source_dir, "tmpgtJ.pt"))
 
                 # Cache everything
-                torch.save(self.slimfuv, os.path.join(self.source_dir, "slimfuv.pt"))
-                torch.save(self.slimuv, os.path.join(self.source_dir, "slimuv.pt"))
-                torch.save(self.slimj, os.path.join(self.source_dir, "slimj.pt"))
-                torch.save(self.slimtranslate, os.path.join(self.source_dir, "slimtranslate.pt"))
+                if not new_init:
+                    torch.save(self.slimfuv, os.path.join(self.source_dir, "slimfuv.pt"))
+                    torch.save(self.slimuv, os.path.join(self.source_dir, "slimuv.pt"))
+                    torch.save(self.slimj, os.path.join(self.source_dir, "slimj.pt"))
+                    torch.save(self.slimtranslate, os.path.join(self.source_dir, "slimtranslate.pt"))
+                    torch.save(self.initweights, os.path.join(self.source_dir, f"sliminitweights_{self.args.softpoisson}.pt"))
 
             ## Store in loaded data so it gets mapped to device
             # Remove extraneous dimension
@@ -424,6 +534,7 @@ class SourceMesh:
             self.__loaded_data['slimuv'] = self.slimuv
             self.__loaded_data['slimj'] = self.slimj
             self.__loaded_data['slimtranslate'] = self.slimtranslate
+            self.__loaded_data['initweights'] = self.initweights
             if self.args.lossgt:
                 self.__loaded_data['gtJ'] = self.gtJ
 
@@ -471,7 +582,6 @@ class SourceMesh:
                         thetas = np.random.uniform(low=0, high=2 * np.pi, size=len(local_tris))
                         rotations = np.array([[[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]] for theta in thetas])
                         local_tris = (np.matmul(rotations, local_tris.transpose(2,1))).transpose(2,1) # F x 3 x 2
-
                 else:
                     local_tris = get_local_tris(vertices, faces) # F x 3 x 2
 
@@ -493,23 +603,11 @@ class SourceMesh:
 
                 np.testing.assert_allclose(fareas3d, fareas2d, err_msg="Isometric embedding: all triangle areas should be same!")
 
-                #### Get jacobians using gradient operator per triangle
-                from igl import grad
-
-                # Gradient operator (F*3 x V)
-                # NOTE: need to compute this separately per triangle b/c of soup
-                from scipy.sparse import bmat
-                G = []
-                for i in range(len(faces)):
-                    G.append(grad(fverts[i].detach().cpu().numpy(), np.arange(3).reshape(1,3)))
-                # Create massive sparse block diagonal matrix
-                G = bmat([[None for _ in range(i)] + [G[i]] + [None for _ in range(i+1, len(G))] for i in range(len(G))])
-
-                # Convert local tris to soup
-                isosoup = self.isofuv.reshape(-1, 2).detach().cpu().numpy() # V x 2
-
-                # Get Jacobians
-                self.isoj = torch.from_numpy((G @ isosoup).reshape(local_tris.shape)).transpose(2,1) # F x 3 x 2
+                # Get jacobians
+                # NOTE: For isometric init, vs/fs need to be based on triangle
+                soupvs = fverts.reshape(-1, 3)
+                soupfs = torch.arange(len(soupvs)).reshape(-1, 3).long().to(fverts.device)
+                self.isoj = get_jacobian_torch(soupvs, soupfs, self.isofuv.reshape(-1, 2), device=device) # F x 2 x 3
 
                 ## Debugging: make sure we can get back the original UVs up to global translation
                 pred_V = torch.einsum("abc,acd->abd", (fverts, self.isoj.transpose(2,1)))
@@ -531,9 +629,13 @@ class SourceMesh:
                     torch.save(self.gtJ, os.path.join(self.source_dir, "tmpgtJ.pt"))
 
                 # Cache everything
-                torch.save(self.isofuv, os.path.join(self.source_dir, "isofuv.pt"))
-                torch.save(self.isoj, os.path.join(self.source_dir, "isoj.pt"))
-                torch.save(self.isotranslate, os.path.join(self.source_dir, "isotranslate.pt"))
+                if not new_init:
+                    torch.save(self.isofuv, os.path.join(self.source_dir, "isofuv.pt"))
+                    torch.save(self.isoj, os.path.join(self.source_dir, "isoj.pt"))
+                    torch.save(self.isotranslate, os.path.join(self.source_dir, "isotranslate.pt"))
+
+            # fverts = ogvs[ogfs].reshape(-1, 3)
+            # self.cutfs = np.arange(len(fverts)).reshape(-1, 3)
 
             ## Store in loaded data so it gets mapped to device
             # NOTE: need to transpose isoj to interpret as 2x3
@@ -582,25 +684,35 @@ class SourceMesh:
             self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_array(source_v,source_f, self.source_dir, self.__ttype,
                                                                                        cpuonly=self.cpuonly, load_wks_samples=self.__use_wks,
                                                                                        load_wks_centroids=self.__use_wks,
-                                                                                       top_k_eig=self.top_k_eig)
+                                                                                       top_k_eig=self.top_k_eig,
+                                                                                       softpoisson=self.args.softpoisson,
+                                                                                        sparse=self.args.sparsepoisson)
         else:
             if os.path.isdir(self.source_dir):
                 self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_directory(self.source_dir, self.__ttype,
                                                                                                cpuonly=self.cpuonly,
                                                                                                load_wks_samples=self.__use_wks,
                                                                                                load_wks_centroids=self.__use_wks,
-                                                                                               top_k_eig=self.top_k_eig)
+                                                                                               top_k_eig=self.top_k_eig,
+                                                                                                softpoisson=self.args.softpoisson,
+                                                                                                sparse=self.args.sparsepoisson)
             else:
                 self.mesh_processor = MeshProcessor.MeshProcessor.meshprocessor_from_file(self.source_dir, self.__ttype,
                                                                                           cpuonly=self.cpuonly,
                                                                                           load_wks_samples=self.__use_wks,
                                                                                           load_wks_centroids=self.__use_wks,
-                                                                                          top_k_eig=self.top_k_eig)
+                                                                                          top_k_eig=self.top_k_eig,
+                                                                                            softpoisson=self.args.softpoisson,
+                                                                                            sparse=self.args.sparsepoisson)
         self.__init_from_mesh_data(new_init)
 
     def get_point_dim(self):
         if self.flatten:
             return self.flat_vector.shape[1]
+
+        if self.args.initweightinput:
+            return self.centroids_and_normals.shape[1] + len(self.initweights)
+
         return self.centroids_and_normals.shape[1]
 
     def get_centroids_and_normals(self):

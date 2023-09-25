@@ -12,7 +12,7 @@ class BatchOfTargets:
     datastructure for the target mappings, in batched form (one source can be mapped to multiple targets)
     '''
 
-    def __init__(self, target_inds, target_dirs, extra_target_fields, scale, ttype):
+    def __init__(self, target_inds, target_dirs, extra_target_fields, scale, ttype, sparse=True):
         self.target_dirs = target_dirs
         self.target_inds = target_inds
 
@@ -27,6 +27,7 @@ class BatchOfTargets:
         self.__target_global_translation_to_original = 0
         self.__target_mesh_centroid = None
         self.mesh_processors = {}
+        self.sparse = sparse
 
     def change_loaded_data(self,key, value):
         assert(key in self.__loaded_data), "Thibault: I told you so. Do you find this useful now?"
@@ -84,11 +85,11 @@ class BatchOfTargets:
                 use_wks = 'samples_wks' in self.__extra_keys
                 if self.V is None:
                     if os.path.isdir(f):
-                        self.mesh_processors[f] = MeshProcessor.MeshProcessor.meshprocessor_from_directory(f, self.ttype,  load_wks_samples=use_wks, load_wks_centroids=use_wks)
+                        self.mesh_processors[f] = MeshProcessor.MeshProcessor.meshprocessor_from_directory(f, self.ttype,  load_wks_samples=use_wks, load_wks_centroids=use_wks, sparse=self.sparse)
                     else:
-                        self.mesh_processors[f] = MeshProcessor.MeshProcessor.meshprocessor_from_file(f, self.ttype,  load_wks_samples=use_wks, load_wks_centroids=use_wks)
+                        self.mesh_processors[f] = MeshProcessor.MeshProcessor.meshprocessor_from_file(f, self.ttype,  load_wks_samples=use_wks, load_wks_centroids=use_wks, sparse=self.sparse)
                 else:
-                    self.mesh_processors[f] = MeshProcessor.MeshProcessor.meshprocessor_from_array(self.V[i], self.F[i], f, self.ttype,  load_wks_samples=use_wks, load_wks_centroids=use_wks)
+                    self.mesh_processors[f] = MeshProcessor.MeshProcessor.meshprocessor_from_array(self.V[i], self.F[i], f, self.ttype,  load_wks_samples=use_wks, load_wks_centroids=use_wks, sparse=self.sparse)
 
             processor = self.mesh_processors[f]
             tensor = processor.get_data(name, file_type)

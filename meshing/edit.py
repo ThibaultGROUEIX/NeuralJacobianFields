@@ -395,7 +395,7 @@ def do_collapse(mesh, e_id):
 
 class EdgeCut():
     def __init__(
-        self, mesh, e_i, startv, cutbdry=False, e2_i = None
+        self, mesh, e_i, startv, cutbdry=False, e2_i = None, checktopo = True
     ):
         """ e_i: index of edge to cut
             startv: where to start the cut (determines the direction of cut). If cutting two edges, then must be incident to both.
@@ -404,6 +404,7 @@ class EdgeCut():
         self.mesh = mesh
         self.e_i = e_i
         self.cutbdry = cutbdry
+        self.checktopo = checktopo
 
         # Unit testing
         assert startv in [v.index for v in mesh.topology.edges[e_i].two_vertices()], f"Start vertex must be on the chosen cut edge!"
@@ -483,7 +484,8 @@ class EdgeCut():
 
                 ## Test topology
                 self.mesh.topology.compactify_keys()
-                self.mesh.topology.thorough_check()
+                if self.checktopo:
+                    self.mesh.topology.thorough_check()
 
                 ## Check for targetv split condition (if targetv is also on a boundary)
                 bd1 = he_bounds[0].face
@@ -521,12 +523,14 @@ class EdgeCut():
 
                     ## Loop through full boundary and reassign boundary index
                     for he in bd1.adjacentHalfedges():
+                        assert he.onBoundary
                         if he.face != bd1:
                             he.face = bd1
 
                     ## Test topology
                     self.mesh.topology.compactify_keys()
-                    self.mesh.topology.thorough_check()
+                    if self.checktopo:
+                        self.mesh.topology.thorough_check()
 
                     assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
 
@@ -569,7 +573,8 @@ class EdgeCut():
 
                 ## Test topology
                 self.mesh.topology.compactify_keys()
-                self.mesh.topology.thorough_check()
+                if self.checktopo:
+                    self.mesh.topology.thorough_check()
 
                 ## Check for targetv split condition
                 bd1 = he_bounds[0].face
@@ -612,7 +617,8 @@ class EdgeCut():
 
                     ## Test topology
                     self.mesh.topology.compactify_keys()
-                    self.mesh.topology.thorough_check()
+                    if self.checktopo:
+                        self.mesh.topology.thorough_check()
 
                     assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
 
@@ -717,7 +723,8 @@ class EdgeCut():
 
                 ## Test topology
                 self.mesh.topology.compactify_keys()
-                self.mesh.topology.thorough_check()
+                if self.checktopo:
+                    self.mesh.topology.thorough_check()
 
                 ## Check for targetv2 split condition
                 bd1 = newbd
@@ -759,7 +766,8 @@ class EdgeCut():
 
                     ## Test topology
                     self.mesh.topology.compactify_keys()
-                    self.mesh.topology.thorough_check()
+                    if self.checktopo:
+                        self.mesh.topology.thorough_check()
 
                     assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
 
@@ -840,7 +848,8 @@ class EdgeCut():
 
                 ## Test topology
                 self.mesh.topology.compactify_keys()
-                self.mesh.topology.thorough_check()
+                if self.checktopo:
+                    self.mesh.topology.thorough_check()
 
                 ## Check for targetv2 split condition
                 targetbhe = [halfe for halfe in targetv2.adjacentHalfedges() if halfe.onBoundary and halfe != newh2]
@@ -881,7 +890,8 @@ class EdgeCut():
 
                     ## Test topology
                     self.mesh.topology.compactify_keys()
-                    self.mesh.topology.thorough_check()
+                    if self.checktopo:
+                        self.mesh.topology.thorough_check()
 
                     assert len([v for v in bdhe.face.adjacentVertices()]) == len([v for v in self.mesh.topology.boundaries[newh1.face.index].adjacentVertices()]), f"Boundaries lengths not the same after targetv split!"
 

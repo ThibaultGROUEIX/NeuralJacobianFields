@@ -15,8 +15,8 @@ from torch.utils.data import DataLoader
 from torch import nn
 import torch
 import PerCentroidBatchMaker
-from utils import stitchtopology
 import MeshProcessor
+from utils import dclamp, ZeroNanGrad
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -29,7 +29,7 @@ from meshing.mesh import Mesh
 from meshing.analysis import computeFacetoEdges
 
 USE_CUPY = True
-has_gpu = "auto"
+has_gpu = "cpu"
 if USE_CUPY and torch.cuda.is_available():
     import cupy
     has_gpu="gpu"
@@ -48,7 +48,7 @@ class MyNet(pl.LightningModule):
     '''
     the network
     '''
-    def __init__(self, encoder, code_dim, args, point_dim=6, verbose=False):
+    def __init__(self, encoder, code_dim, args, point_dim=6, verbose=False, face_dim=0):
         print("********** Some Network info...")
         print(f"********** code dim: {code_dim}")
         print(f"********** centroid dim: {point_dim}")
@@ -63,7 +63,25 @@ class MyNet(pl.LightningModule):
 
         # NOTE: code dim refers to the pointnet encoding. Point_dim is centroid position (also potentially fourier features)
         layer_normalization = self.get_layer_normalization_type()
-        if hasattr(self.args, "dense") and self.args.dense:
+        if self.args.softpoisson:
+            assert face_dim > 0, f"face_dim must be > 0 for soft poisson. face_dim: {face_dim}."
+
+            # NOTE: Dimension of output depends on max of # edge weights being predicted across dataset
+            output_dim = 9 + face_dim
+            self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, 128),
+                                                  nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
+                                                  nn.ReLU(),
+                                                  nn.Linear(128, 128),
+                                                  nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
+                                                  nn.ReLU(),
+                                                  nn.Linear(128, 128),
+                                                  nn.GroupNorm(num_groups=4, num_channels=128),
+                                                  nn.ReLU(),
+                                                  nn.Linear(128, 128),
+                                                  nn.GroupNorm(num_groups=4, num_channels=128),
+                                                  nn.ReLU(),
+                                                  nn.Linear(128, output_dim))
+        elif hasattr(self.args, "dense") and self.args.dense:
             print("==== We are predicting FLAT vectors! ==== ")
             if self.args.dense == "xyz":
                 channels = (point_dim + code_dim) * 3
@@ -164,10 +182,18 @@ class MyNet(pl.LightningModule):
         else:
             raise Exception("unknown normalization method")
 
+        # for layer in self.per_face_decoder:
+        #     if isinstance(layer, nn.Linear):
+        #         torch.nn.init.xavier_normal_(layer.weight)
+
         self.__IDENTITY_INIT = self.args.identity
         if self.__IDENTITY_INIT:
-            self.per_face_decoder[-1].bias.data.zero_()
-            self.per_face_decoder[-1].weight.data.zero_()
+            self.per_face_decoder[-1].bias.data[:9].zero_()
+            self.per_face_decoder[-1].weight.data[:9].zero_()
+
+            # if self.args.facediminit:
+            #     self.per_face_decoder[-1].bias.data[9:] = self.args.facediminit
+            #     self.per_face_decoder[-1].weight.data[9:] = self.args.facediminit
 
         self.__global_trans = self.args.globaltrans
         if self.__global_trans:
@@ -191,6 +217,9 @@ class MyNet(pl.LightningModule):
         self.lr = args.lr
         self.val_step_iter = 0
         self.__test_stats = paper_stats.PaperStats()
+
+        # For iterative reweighting
+        self.stitchweights = {}
 
     ##################
     # inference code below
@@ -241,8 +270,46 @@ class MyNet(pl.LightningModule):
                 stacked = net_input.prep_for_linear_layer(stacked)
             else:
                 stacked = net_input.prep_for_conv1d(stacked)
+
+        # Init weight inputs if set
+        if self.args.initweightinput:
+            stacked = torch.cat([stacked, torch.stack([source.initweights] * stacked.shape[0], dim=0).to(stacked.device)], dim=1)
+
         # feed the 2D tensor through the network, and get a 3x3 matrix for each (z_i|c_j)
         res = self.forward(stacked)
+
+        # NOTE: soft poisson weights will be dot product of "face latents" predicted per triangle for corresponding faces
+        if self.args.softpoisson:
+            facelatents = res[:, 9:]
+
+            # NOTE: Using face latent similarity means that both incident vertices share SAME weights
+            # This is a GOOD thing. There is not case when you split one vertex on an edge and need to keep the other in place!
+            if self.args.softpoisson == "edges":
+                facepairs = source.facepairs
+            else:
+                facepairs = source.allfacepairs
+
+            if self.args.spweight == "sigmoid":
+                facedot = torch.sum(facelatents[facepairs[:,0]] * facelatents[facepairs[:,1]], dim=1)
+                facesim = torch.sigmoid(facedot + source.initweights.to(facedot.device))
+            elif self.args.spweight == "seamless":
+                facedot = torch.sum(facelatents[facepairs[:,0]] * facelatents[facepairs[:,1]], dim=1)
+                facesim = (facedot + source.initweights.to(facedot.device))**2/((facedot + source.initweights.to(facedot.device))**2 + self.args.seamlessdelta)
+            elif self.args.spweight == "cosine":
+                # TODO: Check the cholespy code for positive definite check
+                # clamp(Cosine similarity + initweights, 1e-7, 1) => weights must be nonzero for positive def!
+                facesim = dclamp(torch.nn.functional.cosine_similarity(facelatents[facepairs[:,0]], facelatents[facepairs[:,1]]) \
+                                + source.initweights.to(facelatents.device), 1e-7, 1)
+            else:
+                raise Exception(f"Unknown soft poisson weight type: {self.args.spweight}.")
+            weights = -facesim
+
+            if self.args.softpoisson == "edges":
+                assert len(weights) == len(source.valid_edge_pairs), f"weights len: {len(weights)}, valid edge pairs len: {len(source.valid_edge_pairs)}"
+            else:
+                assert len(weights) == len(source.valid_pairs), f"weights len: {len(weights)}, valid pairs len: {len(source.valid_pairs)}"
+
+            res = res[:, :9]
 
         # No global codes
         if self.args.dense or codes is None:
@@ -251,6 +318,9 @@ class MyNet(pl.LightningModule):
             if self.__IDENTITY_INIT:
                 for i in range(0, 3):
                     ret[:, :, i, i] += 1
+
+            if self.args.softpoisson:
+                return ret, weights
 
             return ret
 
@@ -267,6 +337,10 @@ class MyNet(pl.LightningModule):
         if self.__IDENTITY_INIT:
             for i in range(0, 3):
                 ret[:, :, i, i] += 1
+
+        if self.args.softpoisson:
+            return ret, weights
+
         return ret
 
     def extract_code(self, source, target):
@@ -276,6 +350,146 @@ class MyNet(pl.LightningModule):
 		:return: Bx|z| batch of codes z
 		'''
         return self.encoder.encode_deformation(source, target)
+
+    def hardpoisson(self, source, jacobians, vertices, faces, weights, vertex_pairs, threshold=0.5):
+        assert len(vertex_pairs)  == len(weights), f"vertex pairs len: {len(vertex_pairs)}, weights len: {len(weights)}"
+        # Compute new topology based off the weights (under threshold => have edge/no cut)
+        seamlengths = []
+        mesh = Mesh(vertices.detach().cpu().numpy(), faces.detach().cpu().numpy())
+
+        ## Cutting strategy
+        # Map weights => edge cuts
+        # Loop through edges and cut with prio:
+        # (1) edge on boundary
+        # (2) two edges which share a vertex
+        # (3) worst case: have to cut internal edge while choosing random adjacent edge as e2_i
+        from meshing.edit import EdgeCut
+
+        # NOTE: This assumes softpoisson = edges
+        cut_e = np.unique(source.edges[np.where(weights > threshold)[0]]) # Dupes b/c vertex pair:edges is 2:1
+
+        # Filter out bad edges (edges on boundary)
+        bd_edges = []
+        for candidate_e in cut_e:
+            if mesh.topology.edges[candidate_e].onBoundary():
+                bd_edges.append(candidate_e)
+        if len(bd_edges) > 0:
+            print(f"Hard Poisson: Found {len(bd_edges)} boundary edges in cut edges. Deleting ... ")
+            cut_e = np.delete(cut_e, np.where(np.isin(cut_e, bd_edges)))
+
+        # Store indices of vertices which correspond to cut edges
+        # TODO: Cut edges indexing is incorrect! Need to update for subsequent cuts.
+        hp_cutedges = []
+        while len(cut_e) > 0:
+            eidx = None
+            vidx = None
+            # (1) One vertex on boundary
+            for candidate_e in cut_e:
+                if np.any([v.onBoundary() for v in mesh.topology.edges[candidate_e].two_vertices()]):
+                    eidx = candidate_e
+                    edge = mesh.topology.edges[candidate_e]
+                    vidx = edge.halfedge.vertex.index if edge.halfedge.vertex.onBoundary() else edge.halfedge.twin.vertex.index
+                    break
+            if eidx is not None and vidx is not None:
+                cute1 = [v.index for v in mesh.topology.edges[eidx].two_vertices()]
+                cute2 = [cute1[0], len(mesh.topology.vertices)] if vidx != cute1[0] else [cute1[1], len(mesh.topology.vertices)]
+                hp_cutedges.append(cute1)
+                hp_cutedges.append(cute2)
+
+                seamlengths.append(mesh.length(mesh.topology.edges[eidx]))
+                EdgeCut(mesh, eidx, vidx, cutbdry=True, checktopo=False).apply()
+                cut_e = np.delete(cut_e, np.where(cut_e == eidx))
+                continue
+
+            # (2) Two edges adjacent to each other
+            eidx = None
+            eidx2 = None
+            for candidate_e in cut_e:
+                for candidate_e2 in mesh.topology.edges[candidate_e].halfedge.vertex.adjacentEdges():
+                    if candidate_e2.index in cut_e and candidate_e2.index != candidate_e:
+                        eidx = candidate_e
+                        eidx2 = candidate_e2.index
+                        break
+
+                if eidx is not None and eidx2 is not None:
+                    break
+
+                for candidate_e2 in mesh.topology.edges[candidate_e].halfedge.twin.vertex.adjacentEdges():
+                    if candidate_e2.index in cut_e and candidate_e2.index != candidate_e:
+                        eidx = candidate_e
+                        eidx2 = candidate_e2.index
+                        break
+
+                if eidx is not None and eidx2 is not None:
+                    break
+
+            if eidx is not None and eidx2 is not None:
+                cute1 = [v.index for v in mesh.topology.edges[eidx].two_vertices()]
+                cute2 = [cute1[0], len(mesh.topology.vertices)] if vidx != cute1[0] else [cute1[1], len(mesh.topology.vertices)]
+                hp_cutedges.append(cute1)
+                hp_cutedges.append(cute2)
+
+                cute1 = [v.index for v in mesh.topology.edges[eidx2].two_vertices()]
+                cute2 = [cute1[0], len(mesh.topology.vertices)] if vidx != cute1[0] else [cute1[1], len(mesh.topology.vertices)]
+                hp_cutedges.append(cute1)
+                hp_cutedges.append(cute2)
+
+                seamlengths.append(mesh.length(mesh.topology.edges[eidx]))
+                seamlengths.append(mesh.length(mesh.topology.edges[eidx2]))
+
+                vidx = list(set(mesh.topology.edges[eidx].two_vertices()).intersection(mesh.topology.edges[eidx2].two_vertices()))[0].index
+                EdgeCut(mesh, eidx, vidx, cutbdry=True, e2_i=eidx2, checktopo=False).apply()
+                cut_e = np.delete(cut_e, np.where(np.isin(cut_e, [eidx, eidx2])))
+                continue
+
+            # (3) Worst case: choose random adjacent second edge that's not on boundary and not going to create a disconnected component
+            # TODO: CHECK FOR POSSIBLE DISCONNECTION
+            eidx = cut_e[0]
+            for candidate_e2 in mesh.topology.edges[eidx].halfedge.vertex.adjacentEdges():
+                if candidate_e2.index != eidx and not candidate_e2.onBoundary():
+                    eidx2 = candidate_e2.index
+                    break
+
+            if eidx is not None or eidx2 is not None:
+                for candidate_e2 in mesh.topology.edges[eidx].halfedge.twin.vertex.adjacentEdges():
+                    if candidate_e2.index != eidx and not candidate_e2.onBoundary():
+                        eidx2 = candidate_e2.index
+                        break
+
+            if eidx is None or eidx2 is None:
+                raise ValueError(f"Hard Poisson: no valid cuts available for edge cut list {cut_e}.")
+
+            cute1 = [v.index for v in mesh.topology.edges[eidx].two_vertices()]
+            cute2 = [cute1[0], len(mesh.topology.vertices)] if vidx != cute1[0] else [cute1[1], len(mesh.topology.vertices)]
+            hp_cutedges.append(cute1)
+            hp_cutedges.append(cute2)
+
+            cute1 = [v.index for v in mesh.topology.edges[eidx2].two_vertices()]
+            cute2 = [cute1[0], len(mesh.topology.vertices)] if vidx != cute1[0] else [cute1[1], len(mesh.topology.vertices)]
+            hp_cutedges.append(cute1)
+            hp_cutedges.append(cute2)
+
+            seamlengths.append(mesh.length(mesh.topology.edges[eidx]))
+            seamlengths.append(mesh.length(mesh.topology.edges[eidx2]))
+
+            vidx = list(set(mesh.topology.edges[eidx].two_vertices()).intersection(mesh.topology.edges[eidx2].two_vertices()))[0].index
+
+            EdgeCut(mesh, eidx, vidx, cutbdry=True, e2_i=eidx2, checktopo=False).apply()
+            cut_e = np.delete(cut_e, np.where(np.isin(cut_e, [eidx, eidx2])))
+
+        seamlengths = np.array(seamlengths)
+        cutvs, cutfs, cutes = mesh.export_soup()
+        meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(cutvs, cutfs, source.source_dir, source._SourceMesh__ttype,
+                                                                             cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks,
+                                                                             load_wks_centroids=source._SourceMesh__use_wks,
+                                                                             sparse=self.args.sparsepoisson)
+        meshprocessor.prepare_temporary_differential_operators(source._SourceMesh__ttype)
+        poissonsolver = meshprocessor.diff_ops.poisson_solver
+        poissonsolver.to(self.device)
+
+        harduv = poissonsolver.solve_poisson(jacobians).squeeze()
+
+        return harduv, cutvs, cutfs, seamlengths, hp_cutedges
 
     #######################################
     # Pytorch Lightning Boilerplate code (training, logging, etc.)
@@ -332,22 +546,19 @@ class MyNet(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         return self.my_step(batch, batch_idx)
 
-    def get_gt_map(self, source, target):
+    def get_gt_map(self, source, target, softpoisson=False):
         GT_V = target.get_vertices()
-        # if self.__align_2d:  # need to align source and target using procrustes
-        # 	assert self.__2D_target  # this should only be applied when the target is in fact a 2D thing like UV
-        # 	# now just apply procrustes for each GT target in our batch and align it to prediction
-        # 	gt = GT_V
-        # 	pred = pred_V
-        # 	gt = two_dimensional_procrustes(gt.cpu(), pred.clone().detach().cpu())
-        # 	GT_V = gt.to(self.device)
+
         # ground truth jacobians, restricted as well
         GT_J = source.jacobians_from_vertices(GT_V)
         GT_J_restricted = source.restrict_jacobians(GT_J)
         return GT_V, GT_J, GT_J_restricted
 
     def predict_map(self, source, target, initj=None):
-        pred_J = self.predict_jacobians(source, target)
+        if self.args.softpoisson:
+            pred_J, weights = self.predict_jacobians(source, target)
+        else:
+            pred_J = self.predict_jacobians(source, target)
 
         # Need initialization J to have batch dimension
         if initj is not None:
@@ -361,13 +572,33 @@ class MyNet(pl.LightningModule):
         if self.args.align_2D:  # if the target is in 2D the last column of J is 0
             pred_J[:, :,2,:] = 0 # NOTE: predJ shape is B x F x 3 x 3 (where first 3-size is interpreted as axes)
 
-        pred_V = source.vertices_from_jacobians(pred_J)
+        # Update the soft poisson if set
+        # NOTE: might need to reset the weights after running prediction
+        updatedlap = False
+        if self.args.softpoisson:
+            if self.args.softpoisson == "edges":
+                source.poisson.lap.update_vals(weights, source.valid_edge_pairs, source.poisson.lap_pinned,
+                                            source.poisson.lap_pinned_rows, source.poisson.lap_pinned_cols)
+            elif self.args.softpoisson == "valid":
+                source.poisson.lap.update_vals(weights, source.valid_pairs, source.poisson.lap_pinned,
+                                            source.poisson.lap_pinned_rows, source.poisson.lap_pinned_cols)
+
+            updatedlap = True
+
+        pred_V = source.vertices_from_jacobians(pred_J, updatedlap = updatedlap)
 
         # Get back jacobians from predicted vertices
-        pred_J = source.poisson.jacobians_from_vertices(pred_V)
+        # TODO: For now we use pred_J for the predicted jacobians, but we could also use the restriction.
+        # My intuition is that using pred_J while spoofing restriction (by dropping the 3rd row) is better for NN since basis
+        # restriction can result in pretty arbitrary transformation across neighboring triangles but TBD.
 
-        pred_J_restricted = source.restrict_jacobians(pred_J)
-        return pred_V, pred_J, pred_J_restricted
+        pred_J_poiss = source.poisson.jacobians_from_vertices(pred_V)
+        pred_J_restricted_poiss = source.restrict_jacobians(pred_J)
+
+        if self.args.softpoisson:
+            return pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss, weights
+
+        return pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss
 
     def check_map(self, source, target, GT_J, GT_V):
         pred_V = source.vertices_from_jacobians(GT_J)
@@ -429,12 +660,13 @@ class MyNet(pl.LightningModule):
 
         # Save latest predictions
         np.save(os.path.join(self.logger.save_dir, f"latest_preduv.npy"), batch_parts['pred_V'].squeeze().detach().cpu().numpy())
+        np.save(os.path.join(self.logger.save_dir, f"latest_predw.npy"), batch_parts['weights'])
 
-        if self.args.opttrans:
-            np.save(os.path.join(self.logger.save_dir, f"latest_preduv.npy"), batch_parts['pred_V_opttrans'].squeeze().detach().cpu().numpy())
+        # if self.args.opttrans:
+        #     np.save(os.path.join(self.logger.save_dir, f"latest_preduv.npy"), batch_parts['pred_V_opttrans'].squeeze().detach().cpu().numpy())
 
         np.save(os.path.join(self.logger.save_dir, f"latest_predt.npy"), batch_parts['T'])
-        np.save(os.path.join(self.logger.save_dir, f"latest_j.npy"), batch_parts['T'])
+        np.save(os.path.join(self.logger.save_dir, f"latest_predj.npy"), batch_parts["pred_J"].squeeze().detach().cpu().numpy())
 
         # if self.args.no_poisson:
         #     np.save(os.path.join(source_path, f"latest_poissonuv.npy"), batch_parts['poissonUV'].squeeze().detach().cpu().numpy())
@@ -442,14 +674,36 @@ class MyNet(pl.LightningModule):
 
         val_loss = batch_parts['loss'].item()
         if self.args.xp_type == "uv":
+            # Plot the histogram of weights
+            if self.args.softpoisson:
+                import matplotlib.pyplot as plt
+                fig, axs = plt.subplots()
+                # plot ours
+                axs.set_title(f"Epoch {self.current_epoch:05}: SP Weights")
+                axs.hist(batch_parts['weights'], bins=20)
+                plt.savefig(os.path.join(save_path, f"weights_epoch_{self.current_epoch:05}.png"))
+                plt.close(fig)
+                plt.cla()
+                self.logger.log_image(key='weights', images=[os.path.join(save_path, f"weights_epoch_{self.current_epoch:05}.png")],
+                                      step=self.current_epoch)
+
             # NOTE: batch_parts['T'] = triangle soup indexing if no poisson solve
             # If recutting Tutte: then plot the original tutte uvs
-            if self.args.init in ["tutte", 'slim'] and self.args.ninit == -1:
+            if (self.args.init in ["tutte", 'slim'] and self.args.ninit == -1) or \
+                (self.current_epoch == 0 and self.args.init):
                 source = batch[0]
-                uv = source.tutteuv if self.args.init == 'tutte' else source.slimuv
-                cutfs = source.cutfs
+                if self.args.init == "tutte":
+                    uv = source.tutteuv
+                    uvfs = source.cutfs
+                elif self.args.init == "slim":
+                    uv = source.slimuv
+                    uvfs = source.cutfs
+                else:
+                    uv = source.isofuv.reshape(-1, 2)
+                    uvfs = np.arange(len(uv)).reshape(-1, 3)
+
                 plot_uv(save_path, f"{self.args.init} init epoch {self.current_epoch:05}", uv.squeeze().detach().cpu().numpy(),
-                            cutfs, losses=None)
+                            uvfs, losses=None, facecolors = np.arange(len(uvfs))/(len(uvfs)))
 
                 # Also plot the full boundary
                 initfaces = batch_parts["ogT"]
@@ -461,21 +715,62 @@ class MyNet(pl.LightningModule):
                         boundaryvs.append(cutmesh.vertices[v.index])
                     bidx = np.array([[i, i+1] for i in range(len(boundaryvs)-1)] + [[len(boundaryvs)-1, 0]])
                     totboundaries.append(np.array(boundaryvs)[bidx])
-                totboundaries = np.concatenate(totboundaries, axis=0)
+                if len(totboundaries) > 0:
+                    totboundaries = np.concatenate(totboundaries, axis=0)
+                    export_views(source.cutvs, source.cutfs, save_path, filename=f"boundary_mesh_{self.current_epoch:05}.png",
+                                    plotname=f"Initial Mesh Boundary", cylinders=totboundaries,
+                                    device="cpu", n_sample=30, width=200, height=200,
+                                    vmin=0, vmax=1, shading=False)
 
-                export_views(source.cutvs, source.cutfs, save_path, filename=f"boundary_mesh_{self.current_epoch:05}.png",
-                                plotname=f"Initial Mesh Boundary", cylinders=totboundaries,
-                                device="cpu", n_sample=25, width=200, height=200,
-                                vmin=0, vmax=1, shading=False)
+            # Compute cut edges
+            edges = None
+            edgecolors = None
+            vertexseparation = lossdict[0]['vertexseparation']
+
+            edgestitchcheck = vertexseparation[source.edgeidxs].detach().cpu().numpy()
+            cutvidxs = np.where(edgestitchcheck > self.args.cuteps)[0]
+            cutsoup = [source.valid_edges_to_soup[vi] for vi in cutvidxs]
+
+            # NOTE: There will be duplicates in cutsoup b/c every edge has two valid edge pairs
+            # Remove the duplicates here
+            dedupcutsoup = []
+            dedupcutvidxs = []
+            for i in range(len(cutsoup)):
+                souppair = cutsoup[i] # 2 x 2
+                if souppair not in dedupcutsoup:
+                    dedupcutsoup.append(souppair)
+                    dedupcutvidxs.append(cutvidxs[i])
+            print(f"Original cutsoup #: {len(cutsoup)}. Number of dedup cut edges: {len(dedupcutsoup)}.")
+
+            # Dedup'd edge colors and cut edges
+            # NOTE: This ensures consistent coloring of each edge across different cuts
+            edgecolors = np.repeat(np.array(source.edgededupidxs)[dedupcutvidxs]/(np.max(source.edgededupidxs) - 1), 2)
+            edgecolors = np.repeat(dedupcutvidxs, 2)/(len(edgestitchcheck)-1)
+            edges = []
+            for souppair in dedupcutsoup:
+                edges.append(batch_parts["pred_V"].squeeze()[list(souppair[0])].detach().cpu().numpy())
+                edges.append(batch_parts["pred_V"].squeeze()[list(souppair[1])].detach().cpu().numpy())
+            if len(edges) > 0:
+                edges = np.stack(edges, axis=0)
+
+            # Compute flips
+            from utils import get_flipped_triangles
+            flipped = get_flipped_triangles(batch_parts["pred_V"].squeeze().detach().cpu().numpy(), batch_parts['T'].squeeze())
+            flipvals = np.zeros(len(batch_parts['T'].squeeze()))
+            flipvals[flipped] = 1
+            lossdict[0]['fliploss'] = flipvals
 
             if len(batch_parts["pred_V"].shape) == 4:
                 for idx in range(len(batch_parts["pred_V"])):
                     plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(),
-                            batch_parts["T"][idx].squeeze(), losses=lossdict[idx], cmin=0, cmax=2)
+                            batch_parts["T"][idx].squeeze(), losses=lossdict[idx], cmin=0, cmax=2,
+                            facecolors = np.arange(len(batch_parts["T"][idx].squeeze()))/(len(batch_parts["T"][idx].squeeze())),
+                            edges = edges, edgecolors = edgecolors, edgecorrespondences=source.edgecorrespondences, source=source)
             else:
                 plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
-                        batch_parts["T"].squeeze(), losses=lossdict[0], cmin=0, cmax=2)
-
+                        batch_parts["T"].squeeze(), losses=lossdict[0], cmin=0, cmax=2,
+                        facecolors = np.arange(len(batch_parts["T"].squeeze()))/(len(batch_parts["T"].squeeze())),
+                        edges = edges, edgecolors = edgecolors, edgecorrespondences=source.edgecorrespondences, source=source)
 
             # Log the plotted imgs
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
@@ -483,108 +778,243 @@ class MyNet(pl.LightningModule):
 
             if self.args.init in ['tutte', 'slim'] and self.args.ninit == -1:
                 images = [os.path.join(save_path, f"{self.args.init}_init_epoch_{self.current_epoch:05}.png")] + images
+            elif self.current_epoch == 0 and self.args.init:
+                images = [os.path.join(save_path, f"{self.args.init}_init_epoch_{self.current_epoch:05}.png")] + images
 
+            # Filter out all renders that dont exist
+            images = [imgpath for imgpath in images if os.path.exists(imgpath)]
             self.logger.log_image(key='uvs', images=images, step=self.current_epoch)
 
-            if "pred_V_opttrans" in batch_parts.keys():
-                plot_uv(save_path, f"opttrans epoch {self.current_epoch:05}", batch_parts["pred_V_opttrans"].squeeze().detach().cpu().numpy(),
-                            batch_parts["T"].squeeze(), losses=lossdict[0])
+            #### Cuts on original topology for both stitch loss and weights ####
+            ## Flip the key,val in edge correspondences to get map from edgeidxs to og vertex pairs
+            edgecorrespondences = source.edgecorrespondences
+            soupvedge_to_ogvedge = {}
+            for k, v in edgecorrespondences.items():
+                if len(v) > 1:
+                    soupvedge_to_ogvedge[tuple(sorted([v[0][0], v[1][0]]))] = list(k)
+                    soupvedge_to_ogvedge[tuple(sorted([v[0][1], v[1][1]]))] = list(k)
 
-                # Log the plotted imgs
-                images = [os.path.join(save_path, f"opttrans_epoch_{self.current_epoch:05}.png")] + \
-                            [os.path.join(save_path, f"{key}_opttrans_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+            ## Cuts based on stitching loss
+            cutsoupvedges = source.valid_edge_pairs[cutvidxs].long().detach().cpu().numpy()
+            cutsoupvlens = source.elens.detach().cpu().numpy()[cutvidxs]
+            cutogvedges = [soupvedge_to_ogvedge[tuple(sorted(cutsoupvedge))] for cutsoupvedge in cutsoupvedges]
 
-                if self.args.init in ["tutte", 'slim'] and self.args.ninit == -1:
-                    images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
+            # Dedup
+            cutogvedges_stitchloss = []
+            cutlens_stitchloss = []
+            done = []
+            for i in range(len(cutogvedges)):
+                x = cutogvedges[i]
+                if tuple(x) not in done:
+                    cutogvedges_stitchloss.append(x)
+                    cutlens_stitchloss.append(cutsoupvlens[i])
+                    done.append(tuple(x))
 
-                self.logger.log_image(key='opttrans uvs', images=images, step=self.current_epoch)
+            ## Cuts based on weights
+            if self.args.softpoisson == "valid":
+                weights = batch_parts['weights'][source.edgeidxs] + source.initweights[source.edgeidxs].detach().cpu().numpy()
+            else:
+                weights = batch_parts['weights'] + source.initweights.detach().cpu().numpy()
+            cutvidxs_w = np.where(weights <= self.args.weightcuteps)[0]
+            cutsoupvedges = source.valid_edge_pairs[cutvidxs_w].long().detach().cpu().numpy()
+            cutsoupvlens = source.elens.detach().cpu().numpy()[cutvidxs_w]
+            cutogvedges = [soupvedge_to_ogvedge[tuple(sorted(cutsoupvedge))] for cutsoupvedge in cutsoupvedges]
+
+            # Dedup
+            cutogvedges_weight = []
+            cutlens_weight = []
+            done = []
+            for i in range(len(cutogvedges)):
+                x = cutogvedges[i]
+                if tuple(x) not in done:
+                    cutogvedges_weight.append(x)
+                    cutlens_weight.append(cutsoupvlens[i])
+                    done.append(tuple(x))
+
+            #### Compute and plot hard soft poisson ####
+            # NOTE: We only look at valid edge pairs to cut, even if LEARNING is done over all valid pairs!
+            # May also set weights based on the stitching loss instead
+            if self.args.hardpoisson:
+                if self.args.hardpoisson == "loss":
+                    edgeweights = edgestitchcheck[source.edgeidxs]
+                    threshold = self.args.cuteps
+                elif self.args.hardpoisson == "weight":
+                    edgeweights = weights
+                    threshold = self.args.weightcuteps
+
+                hardpoisson_uv, cutvs, cutfs, seamlengths, hardpoisson_cuts = self.hardpoisson(source, batch_parts['pred_J'], batch_parts['source_V'],
+                                                                                torch.from_numpy(batch_parts['ogT']).to(self.device), edgeweights,
+                                                                                vertex_pairs = source.valid_edge_pairs,
+                                                                                threshold = threshold)
+                hardpoisson_uv = hardpoisson_uv[:, :2]
+
+                # Compute seam length and distortion
+                # NOTE: We only have ARAP implemented for now
+                from source_njf.losses import arap
+                distortionenergy = arap(torch.from_numpy(cutvs).float(), torch.from_numpy(cutfs).long(), hardpoisson_uv,
+                                        device=self.device, renormalize=False,
+                                        return_face_energy=True, timeit=False)
+
+                # Visualize the edge cuts
+                hp_ecolors, hp_edges = None, None
+                hardpoisson_uv = hardpoisson_uv.squeeze().detach().cpu().numpy()
+
+                plot_uv(save_path, f"hard poisson epoch {self.current_epoch:05} seam length {np.sum(seamlengths):04f}", hardpoisson_uv,
+                            cutfs, losses={'distortionloss': distortionenergy.detach().cpu().numpy()},
+                            edges = hp_edges, edgecolors=hp_ecolors,
+                            facecolors = np.arange(len(cutfs))/(len(cutfs)))
+
+                images = [os.path.join(save_path, f"hard_poisson_epoch_{self.current_epoch:05}_seam_length_{np.sum(seamlengths):04f}.png")] + \
+                        [os.path.join(save_path, f"distortionloss_hard_poisson_epoch_{self.current_epoch:05}_seam_length_{np.sum(seamlengths):04f}.png")]
+                self.logger.log_image(key='hard poisson', images=images, step=self.current_epoch)
 
             ### Losses on 3D surfaces
-            # NOTE: mesh is original mesh topology (not soup)
+            ### NOTE: mesh is original mesh topology (not soup)
+
+            # Plot edge cuts
+            ogvs = batch_parts["source_V"].detach().cpu().numpy()
+            ogfs = batch_parts["ogT"]
+            cylinderpos = ogvs[cutogvedges_stitchloss]
+
+            # Stitch cut
+            if len(cylinderpos) > 0:
+                export_views(ogvs, batch_parts["ogT"], save_path, filename=f"stitchcuts_mesh_{self.current_epoch:05}.png",
+                            plotname=f"Total stitchcut len: {np.sum(cutlens_stitchloss):0.5f}", cylinders=cylinderpos,
+                            outline_width=0.01, cmap = plt.get_cmap('Reds'),
+                            device="cpu", n_sample=30, width=200, height=200,
+                            vmin=0, vmax=1, shading=False)
+
+            # Weight cut
+            cylinderpos = ogvs[cutogvedges_weight]
+            if len(cylinderpos) > 0:
+                export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weightcuts_mesh_{self.current_epoch:05}.png",
+                            plotname=f"Total weight cut len: {np.sum(cutlens_weight):0.5f}", cylinders=cylinderpos,
+                            outline_width=0.01, cmap = plt.get_cmap('Reds'),
+                            device="cpu", n_sample=30, width=200, height=200,
+                            vmin=0, vmax=1, shading=False)
+
+            # Weights
+            # NOTE: below results in 2x each cylinder but it's fine
+            cylinderpos = []
+            valid_edge_pairs = source.valid_edge_pairs.long().detach().cpu().numpy()
+            for vpair in valid_edge_pairs:
+                cylinderpos.append(ogvs[soupvedge_to_ogvedge[tuple(sorted(vpair))]])
+            cylinderpos = np.stack(cylinderpos, axis=0)
+            cylindervals = np.stack([weights, weights], axis=1) # len(edgeidxs) = # edges x 2
+            export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weights_mesh_{self.current_epoch:05}.png",
+                        plotname=f"Edge Weights", cylinders=cylinderpos,
+                        cylinder_scalars=cylindervals,
+                        outline_width=0.01, cmap = plt.get_cmap('Reds'),
+                        device="cpu", n_sample=30, width=200, height=200,
+                        vmin=0, vmax=1, shading=False)
+
+            images = [os.path.join(save_path, f"weights_mesh_{self.current_epoch:05}.png")]
+            self.logger.log_image(key='pred weight', images=images, step=self.current_epoch)
+
+            edgecorrespondences = source.edgecorrespondences
             for key, val in lossdict[0].items():
                 if "loss" in key: # Hacky way of avoiding aggregated values
-                    if "edge" in key:
-                        # Vtoeloss: F*3 x 1 (vertices ordered by face indexing)
-                        edgecorrespondences = lossdict[0]['edgecorrespondences']
-
-                        # fresnel mesh: ordered by fverts flatten
-                        # Set cylinders and cylinder colors based on original edge topologies
+                    if key == "vertexseploss":
                         ogvs = batch_parts["source_V"].detach().cpu().numpy()
-                        cylinderpos = []
-                        cylindervals = []
-                        count = 0
-                        for edgekey, v in sorted(edgecorrespondences.items()):
-                            # If only one correspondence, then it is a boundary
-                            if len(v) == 1:
-                                continue
-                            eloss = val[count]
-                            cylinderpos.append(ogvs[list(edgekey)])
-                            cylindervals.append([eloss, eloss])
-                            count += 1
-                        cylinderpos = np.stack(cylinderpos, axis=0)
-                        cylindervals = np.array(cylindervals)
+                        valid_pairs = source.valid_pairs
+                        separationloss = val
+
+                        # Convert separation loss to per vertex
+                        from collections import defaultdict
+                        vlosses = defaultdict(np.double)
+                        vlosscount = defaultdict(int)
+                        for i in range(len(valid_pairs)):
+                            pair = valid_pairs[i]
+                            vlosses[pair[0]] += separationloss[i]
+                            vlosses[pair[1]] += separationloss[i]
+                            vlosscount[pair[0]] += 1
+                            vlosscount[pair[1]] += 1
+
+                        # NOTE: Not all vertices will be covered in vlosses b/c they are boundary vertices
+                        vseplosses = np.zeros(len(batch_parts['pred_V'])) # Soup vs
+                        for k, v in sorted(vlosses.items()):
+                            vseplosses[k] = v / vlosscount[k]
 
                         # NOTE: can't let mesh re-export the faces because the indexing will be off
                         export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                                    plotname=f"Avg {key}: {np.mean(val):0.4f}", outline_width=0.01,
+                                    vcolor_vals=vseplosses,
+                                    device="cpu", n_sample=30, width=200, height=200,
+                                    vmin=0, vmax=0.5, shading=False)
+
+                    elif key == "edgecutloss":
+                        from collections import defaultdict
+
+                        valid_edges_to_soup = source.valid_edges_to_soup
+                        edgecutloss = val # edgeidxs x 1
+
+                        ### Roadmap
+                        # For each og edge: get avg of the 2 corresponding edge cut vals + get the two soup edges
+                        soupedgedict = defaultdict(list)
+                        for i in range(len(valid_edges_to_soup)):
+                            soupkey = frozenset((frozenset(valid_edges_to_soup[i][0]), frozenset(valid_edges_to_soup[i][1])))
+                            edgevals = soupedgedict[soupkey]
+                            if len(edgevals) >= 2:
+                                raise ValueError("More than 2 valid edges associated with souppair!")
+                            edgevals.append(edgecutloss[i])
+
+                        # Plot edges if given
+                        ogvs = batch_parts["source_V"].detach().cpu().numpy()
+                        ogfs = batch_parts["ogT"]
+                        ogvsoup = ogvs[ogfs].reshape(-1, 3)
+                        cylindervals = []
+                        cylinderpos = []
+                        for soupkey, edgecutval in soupedgedict.items():
+                            p0 = list(list(soupkey)[0])
+                            edgeval = np.mean(edgecutval)
+                            cylindervals.append([edgeval, edgeval])
+                            cylinderpos.append(ogvsoup[p0])
+                        cylinderpos = np.stack(cylinderpos, axis=0)
+                        cylindervals = np.array(cylindervals)
+
+                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
                                     cylinder_scalars=cylindervals, outline_width=0.01,
-                                    device="cpu", n_sample=25, width=200, height=200,
-                                    vmin=0, vmax=2, shading=False)
+                                    device="cpu", n_sample=30, width=200, height=200,
+                                    vmin=0, vmax=0.1, shading=False)
+
+                    elif key == "edgegradloss": # E x 2
+                        cylindervals = []
+                        cylinderpos = []
+                        ogvs = batch_parts["source_V"].detach().cpu().numpy()
+                        count = 0
+                        for k, v in sorted(edgecorrespondences.items()):
+                            # If only one correspondence, then it is a boundary
+                            if len(v) == 1:
+                                continue
+                            cylinderpos.append(ogvs[list(k)])
+                            cylindervals.append([np.sum(val[count]), np.sum(val[count])])
+                            count += 1
+
+                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                                    plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
+                                    cylinder_scalars=cylindervals, outline_width=0.01,
+                                    device="cpu", n_sample=30, width=200, height=200,
+                                    vmin=0, vmax=0.5, shading=False)
+                    elif key == "sparsecutsloss":
+                        continue
                     else:
                         export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
-                                    plotname=f"Avg {key}: {np.mean(val):0.4f}",
-                                    fcolor_vals=val, device="cpu", n_sample=25, width=200, height=200,
-                                    vmin=0, vmax=0.6, shading=False)
+                                        plotname=f"Avg {key}: {np.mean(val):0.4f}",
+                                        fcolor_vals=val, device="cpu", n_sample=30, width=200, height=200,
+                                        vmin=0, vmax=0.6, shading=False)
 
             # Log together: 3D surface losses + initial tutte cut
             images = [os.path.join(save_path, f"{key}_mesh_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
-            if self.args.init in ["tutte", "slim"] and self.args.ninit == -1:
-                images = [os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")] + images
+            if (self.args.init in ["tutte", "slim"] and self.args.ninit == -1) or \
+                (self.current_epoch == 0 and self.args.init):
+                boundary_path = os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")
+                if os.path.exists(boundary_path):
+                    images = [boundary_path] + images
+
+            # Filter out all renders that dont exist
+            images = [imgpath for imgpath in images if os.path.exists(imgpath)]
             self.logger.log_image(key='3D losses', images=images, step=self.current_epoch)
-
-            ## Poisson values
-            # Check poisson UVs (true UV)
-            if "poissonUV" in batch_parts.keys():
-                plot_uv(save_path, f"poisson epoch {self.current_epoch:05}", batch_parts["poissonUV"].squeeze().detach().cpu().numpy(),
-                        batch_parts["ogT"].squeeze(), losses={'distortionloss': batch_parts['poissonDistortion']})
-
-                images = [os.path.join(save_path, f"poisson_epoch_{self.current_epoch:05}.png"),
-                          os.path.join(save_path, f"distortionloss_poisson_epoch_{self.current_epoch:05}.png")]
-                self.logger.log_image(key='poisson uvs', images=images, step=self.current_epoch)
-
-
-                export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"poisson_mesh_{self.current_epoch:05}.png",
-                            plotname=f"Poisson Distortion Loss: {np.mean(batch_parts['poissonDistortion']):0.4f}",
-                            fcolor_vals=batch_parts['poissonDistortion'], device="cpu", n_sample=25, width=200, height=200,
-                            vmin=0, vmax=0.6, shading=False)
-
-            if "stitchUV" in batch_parts.keys():
-                plot_uv(save_path, f"stitch epoch {self.current_epoch:05}", batch_parts["stitchUV"].squeeze().detach().cpu().numpy(),
-                        batch_parts["ogT"].squeeze(), losses={'distortionloss': batch_parts['stitchDistortion']})
-
-                images = [os.path.join(save_path, f"stitch_epoch_{self.current_epoch:05}.png"),
-                          os.path.join(save_path, f"distortionloss_stitch_epoch_{self.current_epoch:05}.png")]
-                self.logger.log_image(key='stitch uvs', images=images, step=self.current_epoch)
-
-            if self.args.opttrans:
-                # Convert edge cuts to vertex values (separate for each tri => in order of tris)
-                cutedges = batch_parts['cutEdges'] # Indices of cut edges
-                cylinderpos = []
-                for eidx, e in sorted(mesh.topology.edges.items()):
-                    if eidx in cutedges:
-                        cylinderpos.append(mesh.vertices[[e.halfedge.vertex.index, e.halfedge.twin.vertex.index]])
-                if len(cylinderpos) > 0:
-                    cylinderpos = np.stack(cylinderpos, axis=0)
-                else:
-                    cylinderpos = None
-
-                export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"stitch_mesh_{self.current_epoch:05}.png",
-                            plotname=f"Total Cut Length: {np.sum(batch_parts['cutLength']):0.4f}",
-                            cylinders=cylinderpos, device="cpu", n_sample=25, width=200, height=200,
-                            vmin=0, vmax=1, outline_width=0.01, shading=False)
-
-                images = [os.path.join(save_path, f"stitch_mesh_{self.current_epoch:05}.png")]
-                self.logger.log_image(key='opttrans cut', images=images, step=self.current_epoch)
 
         return val_loss
 
@@ -593,10 +1023,12 @@ class MyNet(pl.LightningModule):
         # sanity checking the poisson solve, getting back GT vertices from GT jacobians. This is not used in this training.
         # GTT = batches.get_batch(0).poisson.jacobians_from_vertices(pred_V[0])
         # 		GT_V = batches.get_batch(0).poisson.solve_poisson(GTT)
-
-        # TODO: include in source batch the precomputed Jacobian of Tutte embeddings
         source = source_batch[0]
         target = source_batch[1]
+
+        # Initialize stitchweights if not yet set
+        if batch_idx not in self.stitchweights:
+            self.stitchweights[batch_idx] = torch.ones(len(source.valid_pairs), device=self.device)
 
         initj = None
         initfuv = None
@@ -607,7 +1039,7 @@ class MyNet(pl.LightningModule):
             initfuv = source.tuttefuv.squeeze().to(self.device)
         elif self.args.init == "isometric":
             sourcedim = 2
-            initj = None # NOTE: this is guaranteed to be isometric, so don't need to composite for computing distortion
+            initj = source.isoj.squeeze().to(self.device) # NOTE: this is guaranteed to be isometric, so don't need to composite for computing distortion
             initfuv = source.isofuv.squeeze().to(self.device)
         elif self.args.init == "slim":
             sourcedim = 2
@@ -632,83 +1064,111 @@ class MyNet(pl.LightningModule):
         vertices = torch.from_numpy(vs).float().to(self.device)
         faces = torch.from_numpy(fs).long().to(self.device)
 
-        if self.args.no_poisson:
-            pred_J = self.predict_jacobians(source, target).squeeze() # NOTE: this takes B x F x 3 x 3 => F x 3 x 3
-            pred_J_restricted = source.restrict_jacobians(pred_J)
-
-            # Compute the UV map by dropping last dimension of predJ and multiplying against the face matrices
-            fverts = vertices[faces].transpose(1,2) # F x 3 x 3
-            if self.args.init:
-                # Batch size 1
-                # TODO: swap the einsums so we interpret Jacobians correctly (NOT the transpose)
-                # Reconstruct the initialization UV (minus global translation)
-                pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:2], initfuv.transpose(1,2))).transpose(1,2) # F x 3 x 2
-                # pred_V = torch.einsum("bcd,bde->bce", (tuttefuv, pred_J[:,:2,:2])) # F x 3 x 2
-                # pred_V = torch.einsum("bcd,bce,bej->bcj", (fverts, tuttej, pred_J[:,:2,:2]))
-            else:
-                if len(fverts.shape) == 3:
-                    pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:], fverts)).transpose(1,2) # F x 3 x 2
-                    # pred_V = torch.einsum("bcd,bde->bce", (fverts, pred_J[:,:,:2])) # F x 3 x 2
-                else:
-                    pred_V = torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:], fverts)).transpose(2,3) # B x F x 3 x 2
-                    # pred_V = torch.einsum("abcd,abde->abce", (fverts, pred_J[:,:,:,:2])) # B x F x 3 x 2
-
-            # If gradient stitching, then we save a new tensor with the translated components
-            # NOTE: stop gradient here so the translation loss doesn't affect the network
-            # if self.args.lossgradientstitching:
-            #     trans_V = pred_V.detach() + self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
-            # Add back the optimized translational components
-            if self.args.lossedgeseparation:
-                pred_V += self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
-
-            # Center (for visualization purposes)
-            # if len(fverts.shape) == 3:
-            #     pred_V = pred_V - torch.mean(pred_V, dim=[0,1], keepdim=True)
-            # else:
-            #     pred_V = pred_V - torch.mean(pred_V, dim=[1,2], keepdim=True)
+        if self.args.softpoisson:
+            pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss, weights = self.predict_map(source, target, initj=initj if initj is not None else None)
         else:
-            pred_V, pred_J, pred_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
+            pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss = self.predict_map(source, target, initj=initj if initj is not None else None)
+
+        # if self.args.no_poisson:
+        #     pred_J = self.predict_jacobians(source, target).squeeze() # NOTE: this takes B x F x 3 x 3 => F x 3 x 3
+        #     pred_J_restricted = source.restrict_jacobians(pred_J)
+
+        #     # Compute the UV map by dropping last dimension of predJ and multiplying against the face matrices
+        #     fverts = vertices[faces].transpose(1,2) # F x 3 x 3
+        #     if self.args.init:
+        #         # Batch size 1
+        #         # TODO: swap the einsums so we interpret Jacobians correctly (NOT the transpose)
+        #         # Reconstruct the initialization UV (minus global translation)
+        #         pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:2], initfuv.transpose(1,2))).transpose(1,2) # F x 3 x 2
+        #         # pred_V = torch.einsum("bcd,bde->bce", (tuttefuv, pred_J[:,:2,:2])) # F x 3 x 2
+        #         # pred_V = torch.einsum("bcd,bce,bej->bcj", (fverts, tuttej, pred_J[:,:2,:2]))
+        #     else:
+        #         if len(fverts.shape) == 3:
+        #             pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:], fverts)).transpose(1,2) # F x 3 x 2
+        #             # pred_V = torch.einsum("bcd,bde->bce", (fverts, pred_J[:,:,:2])) # F x 3 x 2
+        #         else:
+        #             pred_V = torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:], fverts)).transpose(2,3) # B x F x 3 x 2
+        #             # pred_V = torch.einsum("abcd,abde->abce", (fverts, pred_J[:,:,:,:2])) # B x F x 3 x 2
+
+        #     # If gradient stitching, then we save a new tensor with the translated components
+        #     # NOTE: stop gradient here so the translation loss doesn't affect the network
+        #     # if self.args.lossgradientstitching:
+        #     #     trans_V = pred_V.detach() + self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
+        #     # Add back the optimized translational components
+        #     if self.args.lossedgeseparation:
+        #         pred_V += self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
+
+        #     # Center (for visualization purposes)
+        #     # if len(fverts.shape) == 3:
+        #     #     pred_V = pred_V - torch.mean(pred_V, dim=[0,1], keepdim=True)
+        #     # else:
+        #     #     pred_V = pred_V - torch.mean(pred_V, dim=[1,2], keepdim=True)
+        # else:
+        #     pred_V, pred_J, pred_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
 
         # Drop last dimension of restricted J
-        if pred_J_restricted.shape[2] == 3:
-            pred_J_restricted = pred_J_restricted[:,:,:2]
-        GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target)
+        if pred_J_restricted_poiss.shape[2] == 3:
+            pred_J_restricted_poiss = pred_J_restricted_poiss[:,:,:2]
 
-        if UNIT_TEST_POISSON_SOLVE:
-            success = self.check_map(source, target, GT_J, GT_V) < 0.0001
-            # print(self.check_map(source, target, GT_J, GT_V))
-            assert(success), f"UNIT_TEST_POISSON_SOLVE FAILED!! {self.check_map(source, target, GT_J, GT_V)}"
+        # TODO: Below won't work until batchoftargets is refactored to include face data
+        # GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target, softpoisson=self.args.softpoisson)
+        # if UNIT_TEST_POISSON_SOLVE:
+        #     success = self.check_map(source, target, GT_J, GT_V) < 0.0001
+        #     # print(self.check_map(source, target, GT_J, GT_V))
+        #     assert(success), f"UNIT_TEST_POISSON_SOLVE FAILED!! {self.check_map(source, target, GT_J, GT_V)}"
 
         # Compute losses
         # HACK: lerp seplossdelta
-        if self.args.seploss_schedule:
-            ratio = self.global_step/self.trainer.max_epochs
-            seplossdelta = ratio * self.args.seplossdelta_min + (1 - ratio) * self.args.seplossdelta
-        else:
-            seplossdelta = self.args.seplossdelta
+        # if self.args.seploss_schedule:
+        #     ratio = self.global_step/self.trainer.max_epochs
+        #     seplossdelta = ratio * self.args.seplossdelta_min + (1 - ratio) * self.args.seplossdelta
+        # else:
+        #     seplossdelta = self.args.seplossdelta
 
         ## Stitching loss schedule
-        if self.args.stitchloss_schedule == "linear":
-            ratio = self.global_step/self.trainer.max_epochs
-            stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
-            self.args.stitchlossweight = stitchweight
-        elif self.args.stitchloss_schedule == "cosine":
-            # TODO
-            ratio = self.global_step/self.trainer.max_epochs
-            stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
-            self.args.stitchlossweight = stitchweight
+        # if self.args.stitchloss_schedule == "linear":
+        #     ratio = self.global_step/self.trainer.max_epochs
+        #     stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
+        #     self.args.stitchlossweight = stitchweight
+        # elif self.args.stitchloss_schedule == "cosine":
+        #     # TODO
+        #     ratio = self.global_step/self.trainer.max_epochs
+        #     stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
+        #     self.args.stitchlossweight = stitchweight
 
         # NOTE: pred_V should be F x 3 x 2
         gtJ = None
         if self.args.lossgt:
             gtJ = source.gtJ.squeeze().to(self.device)
 
-        loss = self.lossfcn.computeloss(vertices, faces, pred_V, pred_J[:,:2,:sourcedim], initjacobs=initj,
-                                        seplossdelta=seplossdelta, transuv=None, gtjacobians=gtJ)
+        # NOTE predict_map already composites pred_J against initj
+        pred_V = pred_V[:, :, :2].squeeze().reshape(-1, 3, 2)
+        loss = self.lossfcn.computeloss(vertices, faces, ZeroNanGrad.apply(pred_V), ZeroNanGrad.apply(pred_J_poiss[:,:2,:]),
+                                        gtjacobians=gtJ, weights=weights, stitchweights=self.stitchweights[batch_idx],
+                                        edgeidxs=source.edgeidxs, elens=source.elens.to(self.device))
         lossrecord = self.lossfcn.exportloss()
         self.lossfcn.clear() # This resets the loss record dictionary
 
-        loss = loss.type_as(GT_V)
+        # If running stitchweights, then update here
+        # NOTE: stitchweights is len(valid_pairs) but weights is len(valid_edges)
+        if self.args.stitchweight and self.args.softpoisson:
+            if self.args.stitchweight == "stitchloss":
+                self.stitchweights[batch_idx] = 1/(lossrecord[0]['vertexseparation'] + 1e-10)
+                assert self.stitchweights.requires_grad == False
+            elif self.args.stitchweight == "softweight":
+                if self.args.softpoisson == "edges":
+                    self.stitchweights[batch_idx][source.edgeidxs] = -weights
+                else:
+                    self.stitchweights[batch_idx] = -weights
+            elif self.args.stitchweight == "softweightdetach":
+                if self.args.softpoisson == 'edges':
+                    self.stitchweights[batch_idx][source.edgeidxs] = -weights.detach()
+                else:
+                    self.stitchweights[batch_idx] = -weights.detach()
+                assert self.stitchweights[batch_idx].requires_grad == False
+            else:
+                raise ValueError(f"Unknown stitchweight {self.args.stitchweight}")
+
         if self.verbose:
             print(
                 f"batch of {target.get_vertices().shape[0]:d} source <--> target pairs, each mesh {target.get_vertices().shape[1]:d} vertices, {source.get_source_triangles().shape[1]:d} faces")
@@ -716,12 +1176,16 @@ class MyNet(pl.LightningModule):
             "target_V": vertices.detach(),
             "source_V": vertices.detach(),
             "pred_V": pred_V.detach(),
+            "pred_J": pred_J.detach(),
             "T": faces.detach().cpu().numpy(),
             'source_ind': source.source_ind,
             'target_inds': target.target_inds,
             "lossdict": lossrecord,
             "loss": loss
         }
+
+        if self.args.softpoisson:
+            ret['weights'] = -weights.detach().cpu().numpy()
 
         # Need to adjust the return values if no poisson solve
         if self.args.no_poisson and len(pred_V) == len(faces):
@@ -748,20 +1212,20 @@ class MyNet(pl.LightningModule):
 
             # NOTE: Post-process topology if running edge gradient optimization
             # Run poisson solve on updated topology
-            if self.args.opttrans:
-                # Replace predV with L0 lstsq translations
-                from source_njf.utils import leastSquaresTranslation
+            # if self.args.opttrans:
+            #     # Replace predV with L0 lstsq translations
+            #     from source_njf.utils import leastSquaresTranslation
 
-                vs = source.get_vertices().detach().cpu().numpy()
-                fs = faces.detach().cpu().numpy()
+            #     vs = source.get_vertices().detach().cpu().numpy()
+            #     fs = faces.detach().cpu().numpy()
 
-                opttrans, cutedges, cutlength = leastSquaresTranslation(vs, fs, pred_V.detach().cpu().numpy(), return_cuts = True,
-                                                   iterate=True, debug=False, patience=5, cut_epsilon=self.args.cuteps)
-                ret['pred_V_opttrans'] = (pred_V.detach() + torch.from_numpy(opttrans).to(self.device)).reshape(-1, 2)
-                ret['cutEdges'] = cutedges
-                ret['cutLength'] = cutlength
+            #     opttrans, cutedges, cutlength = leastSquaresTranslation(vs, fs, pred_V.detach().cpu().numpy(), return_cuts = True,
+            #                                        iterate=True, debug=False, patience=5, cut_epsilon=self.args.cuteps)
+            #     ret['pred_V_opttrans'] = (pred_V.detach() + torch.from_numpy(opttrans).to(self.device)).reshape(-1, 2)
+            #     ret['cutEdges'] = cutedges
+            #     ret['cutLength'] = cutlength
 
-                ### Create new topology based on least squares cuts
+            #     ## Create new topology based on least squares cuts
                 # meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(postv, postf, source.source_dir, source._SourceMesh__ttype,
                 #                                                                      cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks,
                 #                                                                      load_wks_centroids=source._SourceMesh__use_wks)
@@ -782,23 +1246,23 @@ class MyNet(pl.LightningModule):
                 #     # TODO: ASK NOAM ABOUT WHETHER YOU CAN DO THIS WITH TRIANGLE SOUP
                 #     stitchv = poissonsolver.solve_poisson(pred_J)
                 #     stitchJ = poissonsolver.jacobians_from_vertices(stitchv)
-            else:
-                ret['pred_V'] = pred_V.detach().reshape(-1, 2)
+            # else:
 
+            ret['pred_V'] = pred_V.detach().reshape(-1, 2)
             ret['T'] = np.arange(len(faces)*3).reshape(len(faces), 3)
 
             # NOTE: Poisson solve on original topology
-            with torch.no_grad():
-                pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
+            # with torch.no_grad():
+            #     pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
 
-            ret['poissonUV'] = pred_V
-            # NOTE: Initj already FACTORED into the predict map!!
-            poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
-            ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
+            # ret['poissonUV'] = pred_V
+            # # NOTE: Initj already FACTORED into the predict map!!
+            # poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
+            # ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
 
-        if self.args.test:
-            ret['pred_J_R'] = poisson_J_restricted.detach()
-            ret['target_J_R'] = GT_J_restricted.detach()
+        # if self.args.test:
+        #     ret['pred_J_R'] = poisson_J_restricted.detach()
+        #     ret['target_J_R'] = GT_J_restricted.detach()
 
         return ret
 
@@ -1193,7 +1657,7 @@ def main(gen, args):
                          num_nodes=1,
                          gradient_clip_val=args.gradclip,
                          deterministic= args.deterministic,
-                         strategy='ddp' if torch.cuda.is_available() else None,
+                         strategy='ddp' if torch.cuda.is_available() else 'auto',
                          callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
     # Cache directory
@@ -1227,6 +1691,12 @@ def main(gen, args):
 
     train_dataset = DeformationDataset(train_pairs, gen.get_keys_to_load(True),
                                        gen.get_keys_to_load(False), use_dtype, train=True, args=args)
+
+    # Initialize the highest weights dim here
+    # if args.softpoisson:
+    #     train_dataset.get_weights_dim()
+    #     print(f"\n========== Soft poisson training: weights dim is {train_dataset.weightsdim} ========== \n")
+
     train_loader = DataLoader(train_dataset, batch_size=1, collate_fn=custom_collate, pin_memory = (args.unpin_memory is None),
                               shuffle=(args.test is None), num_workers=args.workers, persistent_workers=args.workers > 0)
 
@@ -1235,9 +1705,11 @@ def main(gen, args):
     else:
         valid_dataset = DeformationDataset(valid_pairs, gen.get_keys_to_load(True),
                                            gen.get_keys_to_load(False), use_dtype, train=False, args=args)
+        # if args.softpoisson:
+        #     valid_dataset.get_weights_dim()
+
         valid_loader = DataLoader(valid_dataset, batch_size=1, collate_fn=custom_collate, pin_memory=(args.unpin_memory is None),
                                   shuffle=False, num_workers=0, persistent_workers=0)
-
 
     # ================ #
     # model
@@ -1245,7 +1717,8 @@ def main(gen, args):
     gen.type(use_dtype)
     if model is None:
         assert (isinstance(gen, DeformationEncoder.DeformationEncoder))
-        model = MyNet(gen, gen.get_code_length(train_dataset), point_dim=train_dataset.get_point_dim(), args=args)
+        model = MyNet(gen, gen.get_code_length(train_dataset), point_dim=train_dataset.get_point_dim(), args=args,
+                      face_dim = args.facedim)
 
     # NOTE: Network not initializing with correct device!!!
     if has_gpu == "gpu":
@@ -1379,7 +1852,7 @@ def main(gen, args):
         if args.lossgradientstitching and args.opttrans:
             # Base
             fp_in = f"{vispath}/frames/stitch_mesh_*.png"
-            fp_out = f"{vispath}/frames/stitch_mesh.gif"
+            fp_out = f"{vispath}/stitch_mesh.gif"
             imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
             # Resize images
@@ -1392,44 +1865,31 @@ def main(gen, args):
 
             model.logger.log_image(key=f"mesh cut gif", images=[fp_out])
 
-        ## Poisson solve
-        # if args.no_poisson:
-        #     # Base
-        #     fp_in = f"{vispath}/frames/poisson_epoch_*.png"
-        #     fp_out = f"{vispath}/train_poisson.gif"
-        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in)) if re.search(r'.*(\d+)\.png', f)]
+        # Hard poisson
+        if args.hardpoisson:
+            fp_in = f"{vispath}/frames/hard_poisson_epoch_*.png"
+            fp_out = f"{vispath}/hard_poisson.gif"
+            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
-        #     # Resize images
-        #     basewidth = 400
-        #     wpercent = basewidth/imgs[0].size[0]
-        #     newheight = int(wpercent * imgs[0].size[1])
-        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
-        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-        #             save_all=True, duration=100, loop=0, disposal=2)
+            # Resize images
+            basewidth = 400
+            wpercent = basewidth/imgs[0].size[0]
+            newheight = int(wpercent * imgs[0].size[1])
+            imgs = [img.resize((basewidth, newheight)) for img in imgs]
+            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                    save_all=True, duration=100, loop=0, disposal=2)
 
-        #     # Embedding distortion
-        #     fp_in = f"{vispath}/frames/distortionloss_poisson_epoch_*.png"
-        #     fp_out = f"{vispath}/train_poisson_distortionloss.gif"
-        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
+            fp_in = f"{vispath}/frames/distortionloss_hard_poisson_epoch_*.png"
+            fp_out = f"{vispath}/distortionloss_hard_poisson.gif"
+            imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 
-        #     # Resize images
-        #     basewidth = 400
-        #     wpercent = basewidth/imgs[0].size[0]
-        #     newheight = int(wpercent * imgs[0].size[1])
-        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
-        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-        #             save_all=True, duration=100, loop=0, disposal=2)
+            # Resize images
+            basewidth = 400
+            wpercent = basewidth/imgs[0].size[0]
+            newheight = int(wpercent * imgs[0].size[1])
+            imgs = [img.resize((basewidth, newheight)) for img in imgs]
+            imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
+                    save_all=True, duration=100, loop=0, disposal=2)
 
-        #     # Mesh distortion
-        #     fp_in = f"{vispath}/frames/poisson_mesh_*.png"
-        #     fp_out = f"{vispath}/train_poisson_mesh.gif"
-        #     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
-
-        #     # Resize images
-        #     basewidth = 1000
-        #     wpercent = basewidth/imgs[0].size[0]
-        #     newheight = int(wpercent * imgs[0].size[1])
-        #     imgs = [img.resize((basewidth, newheight)) for img in imgs]
-        #     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-        #             save_all=True, duration=100, loop=0, disposal=2)
+            model.logger.log_image(key=f"hard poisson gif", images=[f"{vispath}/hard_poisson.gif", f"{vispath}/distortionloss_hard_poisson.gif"])
     # ================ #
