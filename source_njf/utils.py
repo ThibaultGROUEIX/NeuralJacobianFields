@@ -435,15 +435,159 @@ class ZeroNanGrad(torch.autograd.Function):
 def new_topology_from_cuts(mesh, edgelist):
     """ Given unsorted list of edges to cut, sort the cuts by connections and make cuts """
 
+def order_edges_and_cut(mesh, cut_edges):
+    """ cut_edges: list of Edges to cut (NOT indices) """
+    # List of cutlists (edge indices)
+    cutlists = []
+    newe = cut_edges.pop[0]
+    _order_edges(mesh, cutlists, cut_edges, newe)
+
+    # Re-sort so that cutlists which start at boundary are first
+    cutlists = sorted(cutlists, key=lambda x: any([v.onBoundary() for v in x[0].two_vertices()]), reverse=True)
+
+    ### Re-sort so that subsequent cutlists are prio if they are adjacent to prev cut edges
+
+    # Find first index where cutlist doesn't start on boundary
+    nobdi = None
+    for i in range(len(cutlists)):
+        if not any([v.onBoundary() for v in cutlists[i][0].two_vertices()]):
+            nobdi = i
+            break
+
+    # Only need to sort if nobdi is not None
+    if nobdi:
+        # Split cutlists
+        bdcutlist = cutlists[:nobdi]
+        nobdcutlist = cutlists[nobdi:]
+
+        # Collect all edges adjacent to cut edges in bdcutlist
+        goodes = []
+        for cutlist in bdcutlist:
+            for e in cutlist:
+                goodes.extend([e for e in e.adjacentEdges()])
+        goodes = set(goodes)
+
+        # TODO:
+        # Sort nobdcutlist
+
+
+        # Find all cutlists which are adjacent to nobdi
+        nobdi_e = cutlists[nobdi][0]
+        nobdi_adj = []
+        for i in range(len(cutlists)):
+            if i == nobdi:
+                continue
+            if nobdi_e in [e for e in cutlists[i][0].adjacentEdges()]:
+                nobdi_adj.append(i)
+
+        # Move nobdi_adj to front of list
+        for i in nobdi_adj:
+            cutlists.insert(0, cutlists.pop(i))
+
+
+    # NOTE: OG cutlists will be edge indices bc the indexing doesn't change after each cut -- BUT the vertex indices will change!
+    # Loop through cutlists, convert to vertex paths, and make cuts
+    # Convert cutlist to vertex paths and make cuts
+
+def _order_edges(mesh, cutlists, cut_edges, currente):
+    found = False
+    foundi = None
+    for i in range(len(cutlists)):
+        cutlist = cutlists[i]
+
+        # Check if edge connects to end of cutlist
+        adjes = list(cutlist[-1].adjacentEdges())
+        if currente in adjes:
+            found = "end"
+            foundi = i
+            break
+
+        # Check if edge connects to start of cutlist
+        adjes = list(cutlist[0].adjacentEdges())
+        if currente in adjes:
+            found = "beg"
+            foundi = i
+            break
+
+    if not found:
+        # New cutlist
+        cutlists.append([currente])
+        newe = cut_edges.pop[0]
+        _order_edges(mesh, cutlists, cut_edges, newe)
+
+    else:
+        if found == "end":
+            cutlist.append(currente)
+        if found == "beg":
+            cutlist.insert(0, currente)
+
+        # Sweep through all other cutlists to see if merge exists
+        for i in range(len(cutlists)):
+            if i == foundi:
+                continue
+
+            candidate_cutlist = cutlists[i]
+
+            # Check if edge connects to end of cutlist
+            adjes = list(candidate_cutlist[-1].adjacentEdges())
+            if cutlist[0] in adjes:
+                # Append cutlist to candidate and replace in cutlists
+                # NOTE: This updates the object in the list, so we just need to pop the old cutlist
+                candidate_cutlist.extend(cutlist)
+                cutlists.pop(foundi)
+                break
+
+            # Check if edge connects to start of cutlist
+            adjes = list(cutlist[0].adjacentEdges())
+            if cutlist[-1] in adjes:
+                # Append candidate to cutlist and replace in cutlists
+                # NOTE: This updates the object in the list, so we just need to pop the old cutlist
+                cutlist.extend(candidate_cutlist)
+                cutlists.pop(i)
+                break
+
+        newe = cut_edges.pop[0]
+        _order_edges(mesh, cutlists, cut_edges, newe)
+
+
 def make_cut(mesh, cutlist):
     from meshing.edit import EdgeCut
 
-    for i in range(len(cutlist)-1):
+    ### Make first cut (if not on boundary, then need to cut second edge as well)
+    vsource = cutlist[0]
+    vtarget = cutlist[1]
+
+    for he in mesh.topology.vertices[vsource].adjacentHalfedges():
+        if he.tip_vertex().index == vtarget:
+            break
+
+    if not mesh.topology.vertices[vsource].onBoundary():
+        assert len(cutlist) > 3, f"Cutlist length {len(cutlist)} must be at least length 3 to make internal cut!"
+        sourcevi = vtarget
+
+        # If vsource not on boundary, then we cut the subsequent edge as well
+        vtarget2 = cutlist[2]
+        for he2 in mesh.topology.vertices[vtarget].adjacentHalfedges():
+            if he2.tip_vertex().index == vtarget2:
+                break
+        EdgeCut(mesh, he.edge.index, sourcevi, e2_i= he2.edge.index, cutbdry=True).apply()
+        starti = 2
+    else:
+        sourcevi = vsource
+        EdgeCut(mesh, he.edge.index, vsource, cutbdry=True).apply()
+        starti = 1
+
+    # TODO: Extend edgecut so that can create disconnected components
+    # TODO: Check if cutpath results in disconnected components => then need to adjust vsource of the next cut
+    # TODO: How to deal with case when path cuts through multiple connected components???
+    # TODO: need to maintain map from original vertices => component index, new vertex index
+
+    for i in range(starti, len(cutlist)-1):
         vsource = cutlist[i]
         vtarget = cutlist[i+1]
 
         ## Unit tests
-        # Source vertex should be on boundary
+        # Source vertex should be on boundary if not first cut
         assert mesh.topology.vertices[vsource].onBoundary()
 
         for he in mesh.topology.vertices[vsource].adjacentHalfedges():
@@ -592,6 +736,51 @@ def generate_random_cuts(mesh, enforce_disk_topo=True, diskmode='SHORTEST', max_
     if enforce_disk_topo and not mesh.is_disk_topology():
         print("Cut mesh is not disk topology. Generating cuts to enforce disk topology.")
         cutvs.extend(cut_to_disk(mesh, mode=diskmode, limit=1000))
+
+    return cutvs
+
+def generate_boundary_cut(mesh, max_cuts=10, verbose=False):
+    """ Generate single cut on mesh starting from a random spot on the boundary
+
+    Args:
+        mesh (Mesh): halfedge mesh data structure
+    """
+    from meshing.edit import EdgeCut
+    import numpy as np
+
+    cutvs = []
+    assert len(mesh.topology.boundaries) > 0, f"Mesh has no boundaries!"
+
+    # Choose random boundary and vertex on boundary
+    bdi = np.random.randint(0, len(mesh.topology.boundaries))
+    bd = mesh.topology.boundaries[bdi]
+    bdvs = list(bd.adjacentVertices())
+    startvi = np.random.randint(0, len(bdvs))
+    startv = bdvs[startvi]
+    cutvs = [startv.index]
+
+    rng = np.random.default_rng()
+    for i in range(max_cuts):
+        # Find next valid vertex
+        adjvs = list(startv.adjacentVertices())
+        rng.shuffle(adjvs)
+
+        found = False
+        for v in adjvs:
+            if v.onBoundary() or v.index in cutvs:
+                continue
+            else:
+                found = True
+                cutvs.append(v.index)
+                startv = v
+                break
+
+        if not found:
+            print(f"Ran out of valid edges for boundary cut after {i} cuts!")
+            break
+
+    if len(cutvs) > 1:
+        success = make_cut(mesh, cutvs)
 
     return cutvs
 

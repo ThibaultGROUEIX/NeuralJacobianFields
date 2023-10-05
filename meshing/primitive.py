@@ -74,6 +74,13 @@ class Edge(Primitive):
         """
         return (self.halfedge.vertex, self.halfedge.tip_vertex())
 
+    def adjacentEdges(self):
+        v1, v2 = self.two_vertices()
+        for e in v1.adjacentEdges():
+            yield e
+        for e in v2.adjacentEdges():
+            yield e
+
 class Face(Primitive):
     def isBoundaryLoop(self):
         return self.halfedge.onBoundary

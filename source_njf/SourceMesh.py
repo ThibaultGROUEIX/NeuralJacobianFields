@@ -233,7 +233,7 @@ class SourceMesh:
                 self.tuttetranslate = torch.load(os.path.join(self.source_dir, "tuttetranslate.pt"))
                 self.initweights = torch.load(os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt"))
             else:
-                from utils import tutte_embedding, get_local_tris, generate_random_cuts
+                from utils import tutte_embedding, get_local_tris, generate_random_cuts, generate_boundary_cut
 
                 vertices = self.source_vertices
                 device = vertices.device
@@ -247,7 +247,11 @@ class SourceMesh:
                 if new_init:
                     rng = default_rng()
                     n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
-                    cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
+
+                    if self.args.simplecut and n_cuts > 0:
+                        cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
+                    else:
+                        cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
 
                     # Unit test: mesh is still connected
                     vs, fs, es = mesh.export_soup()
@@ -399,7 +403,7 @@ class SourceMesh:
                 self.slimtranslate = torch.load(os.path.join(self.source_dir, "slimtranslate.pt"))
                 self.initweights = torch.load(os.path.join(self.source_dir, f"sliminitweights_{self.args.softpoisson}.pt"))
             else:
-                from utils import SLIM, get_local_tris, generate_random_cuts
+                from utils import SLIM, get_local_tris, generate_random_cuts, generate_boundary_cut
 
                 vertices = self.source_vertices
                 device = vertices.device
@@ -415,7 +419,11 @@ class SourceMesh:
                 if new_init:
                     rng = default_rng()
                     n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
-                    cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
+
+                    if self.args.simplecut and n_cuts > 0:
+                        cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
+                    else:
+                        cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
 
                     # Unit test: mesh is still connected
                     vs, fs, es = mesh.export_soup()

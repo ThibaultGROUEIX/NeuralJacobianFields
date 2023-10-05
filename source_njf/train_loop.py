@@ -16,7 +16,7 @@ from torch import nn
 import torch
 import PerCentroidBatchMaker
 import MeshProcessor
-from utils import dclamp, ZeroNanGrad
+from utils import dclamp, ZeroNanGrad, order_edges_and_cut
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -351,22 +351,25 @@ class MyNet(pl.LightningModule):
 		'''
         return self.encoder.encode_deformation(source, target)
 
-    def hardpoisson(self, source, jacobians, vertices, faces, weights, vertex_pairs, threshold=0.5):
-        assert len(vertex_pairs)  == len(weights), f"vertex pairs len: {len(vertex_pairs)}, weights len: {len(weights)}"
+    def hardpoisson(self, source, jacobians, vertices, faces, cut_values, vertex_pairs, threshold=0.5):
+        """ cut_values: E*2 x 1 array of values to evaluate against threshold to determine cuts"""
+        assert len(vertex_pairs)  == len(cut_values), f"vertex pairs len: {len(vertex_pairs)}, cut_values len: {len(cut_values)}"
         # Compute new topology based off the weights (under threshold => have edge/no cut)
         seamlengths = []
         mesh = Mesh(vertices.detach().cpu().numpy(), faces.detach().cpu().numpy())
 
         ## Cutting strategy
         # Map weights => edge cuts
+        # Construct edge cut list by connecting cut paths
         # Loop through edges and cut with prio:
         # (1) edge on boundary
         # (2) two edges which share a vertex
         # (3) worst case: have to cut internal edge while choosing random adjacent edge as e2_i
         from meshing.edit import EdgeCut
 
-        # NOTE: This assumes softpoisson = edges
-        cut_e = np.unique(source.edges[np.where(weights > threshold)[0]]) # Dupes b/c vertex pair:edges is 2:1
+        # NOTE: If cut values are vertex separation, then either vertex split can result in edge being cut
+        # Weights correspond to vertex pairs which refer to edges (edgeidxs)
+        cut_e = np.unique(source.edges[np.where(cut_values > threshold)[0]]) # Dupes b/c vertex pair:edges is 2:1
 
         # Filter out bad edges (edges on boundary)
         bd_edges = []
@@ -376,6 +379,15 @@ class MyNet(pl.LightningModule):
         if len(bd_edges) > 0:
             print(f"Hard Poisson: Found {len(bd_edges)} boundary edges in cut edges. Deleting ... ")
             cut_e = np.delete(cut_e, np.where(np.isin(cut_e, bd_edges)))
+
+        ### Construct edge cut list (recursive tree search) & make cuts
+        edge_list, vertex_cutlist, seamlengths = order_edges_and_cut(mesh, cut_e)
+
+        # List of cutlists (edge indices)
+
+        # Re-sort so that cutlists which start at boundary are first
+        # Make sure that subsequent cutlists are prio if they start on boundaries
+        # NOTE: OG cutlists will be edge indices bc the indexing doesn't change after each cut -- BUT the vertex indices will change!
 
         # Store indices of vertices which correspond to cut edges
         # TODO: Cut edges indexing is incorrect! Need to update for subsequent cuts.
@@ -596,7 +608,7 @@ class MyNet(pl.LightningModule):
         pred_J_restricted_poiss = source.restrict_jacobians(pred_J)
 
         if self.args.softpoisson:
-            return pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss, weights
+            return pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss, -weights
 
         return pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss
 
@@ -836,7 +848,8 @@ class MyNet(pl.LightningModule):
             # May also set weights based on the stitching loss instead
             if self.args.hardpoisson:
                 if self.args.hardpoisson == "loss":
-                    edgeweights = edgestitchcheck[source.edgeidxs]
+                    # NOTE: Edge stitch check is L2 distances between corresponding vertices!
+                    edgeweights = edgestitchcheck
                     threshold = self.args.cuteps
                 elif self.args.hardpoisson == "weight":
                     edgeweights = weights
@@ -880,7 +893,7 @@ class MyNet(pl.LightningModule):
             if len(cylinderpos) > 0:
                 export_views(ogvs, batch_parts["ogT"], save_path, filename=f"stitchcuts_mesh_{self.current_epoch:05}.png",
                             plotname=f"Total stitchcut len: {np.sum(cutlens_stitchloss):0.5f}", cylinders=cylinderpos,
-                            outline_width=0.01, cmap = plt.get_cmap('Reds'),
+                            outline_width=0.01, cmap = plt.get_cmap('Reds_r'),
                             device="cpu", n_sample=30, width=200, height=200,
                             vmin=0, vmax=1, shading=False)
 
@@ -889,7 +902,7 @@ class MyNet(pl.LightningModule):
             if len(cylinderpos) > 0:
                 export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weightcuts_mesh_{self.current_epoch:05}.png",
                             plotname=f"Total weight cut len: {np.sum(cutlens_weight):0.5f}", cylinders=cylinderpos,
-                            outline_width=0.01, cmap = plt.get_cmap('Reds'),
+                            outline_width=0.01, cmap = plt.get_cmap('Reds_r'),
                             device="cpu", n_sample=30, width=200, height=200,
                             vmin=0, vmax=1, shading=False)
 
@@ -904,7 +917,7 @@ class MyNet(pl.LightningModule):
             export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weights_mesh_{self.current_epoch:05}.png",
                         plotname=f"Edge Weights", cylinders=cylinderpos,
                         cylinder_scalars=cylindervals,
-                        outline_width=0.01, cmap = plt.get_cmap('Reds'),
+                        outline_width=0.01, cmap = plt.get_cmap('Reds_r'),
                         device="cpu", n_sample=30, width=200, height=200,
                         vmin=0, vmax=1, shading=False)
 
@@ -1069,72 +1082,19 @@ class MyNet(pl.LightningModule):
         else:
             pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss = self.predict_map(source, target, initj=initj if initj is not None else None)
 
-        # if self.args.no_poisson:
-        #     pred_J = self.predict_jacobians(source, target).squeeze() # NOTE: this takes B x F x 3 x 3 => F x 3 x 3
-        #     pred_J_restricted = source.restrict_jacobians(pred_J)
-
-        #     # Compute the UV map by dropping last dimension of predJ and multiplying against the face matrices
-        #     fverts = vertices[faces].transpose(1,2) # F x 3 x 3
-        #     if self.args.init:
-        #         # Batch size 1
-        #         # TODO: swap the einsums so we interpret Jacobians correctly (NOT the transpose)
-        #         # Reconstruct the initialization UV (minus global translation)
-        #         pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:2], initfuv.transpose(1,2))).transpose(1,2) # F x 3 x 2
-        #         # pred_V = torch.einsum("bcd,bde->bce", (tuttefuv, pred_J[:,:2,:2])) # F x 3 x 2
-        #         # pred_V = torch.einsum("bcd,bce,bej->bcj", (fverts, tuttej, pred_J[:,:2,:2]))
-        #     else:
-        #         if len(fverts.shape) == 3:
-        #             pred_V = torch.einsum("bcd,bde->bce", (pred_J[:,:2,:], fverts)).transpose(1,2) # F x 3 x 2
-        #             # pred_V = torch.einsum("bcd,bde->bce", (fverts, pred_J[:,:,:2])) # F x 3 x 2
-        #         else:
-        #             pred_V = torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:], fverts)).transpose(2,3) # B x F x 3 x 2
-        #             # pred_V = torch.einsum("abcd,abde->abce", (fverts, pred_J[:,:,:,:2])) # B x F x 3 x 2
-
-        #     # If gradient stitching, then we save a new tensor with the translated components
-        #     # NOTE: stop gradient here so the translation loss doesn't affect the network
-        #     # if self.args.lossgradientstitching:
-        #     #     trans_V = pred_V.detach() + self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
-        #     # Add back the optimized translational components
-        #     if self.args.lossedgeseparation:
-        #         pred_V += self.trainer.optimizers[0].param_groups[batch_idx + 1]['params'][0]
-
-        #     # Center (for visualization purposes)
-        #     # if len(fverts.shape) == 3:
-        #     #     pred_V = pred_V - torch.mean(pred_V, dim=[0,1], keepdim=True)
-        #     # else:
-        #     #     pred_V = pred_V - torch.mean(pred_V, dim=[1,2], keepdim=True)
-        # else:
-        #     pred_V, pred_J, pred_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
-
         # Drop last dimension of restricted J
         if pred_J_restricted_poiss.shape[2] == 3:
             pred_J_restricted_poiss = pred_J_restricted_poiss[:,:,:2]
 
-        # TODO: Below won't work until batchoftargets is refactored to include face data
-        # GT_V, GT_J, GT_J_restricted = self.get_gt_map(source, target, softpoisson=self.args.softpoisson)
-        # if UNIT_TEST_POISSON_SOLVE:
-        #     success = self.check_map(source, target, GT_J, GT_V) < 0.0001
-        #     # print(self.check_map(source, target, GT_J, GT_V))
-        #     assert(success), f"UNIT_TEST_POISSON_SOLVE FAILED!! {self.check_map(source, target, GT_J, GT_V)}"
-
-        # Compute losses
-        # HACK: lerp seplossdelta
-        # if self.args.seploss_schedule:
-        #     ratio = self.global_step/self.trainer.max_epochs
-        #     seplossdelta = ratio * self.args.seplossdelta_min + (1 - ratio) * self.args.seplossdelta
-        # else:
-        #     seplossdelta = self.args.seplossdelta
-
         ## Stitching loss schedule
-        # if self.args.stitchloss_schedule == "linear":
-        #     ratio = self.global_step/self.trainer.max_epochs
-        #     stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
-        #     self.args.stitchlossweight = stitchweight
-        # elif self.args.stitchloss_schedule == "cosine":
-        #     # TODO
-        #     ratio = self.global_step/self.trainer.max_epochs
-        #     stitchweight = ratio * self.args.stitchlossweight_max + (1 - ratio) * self.args.stitchlossweight_min
-        #     self.args.stitchlossweight = stitchweight
+        if self.args.sparse_schedule == "linear":
+            ratio = self.global_step/self.trainer.max_epochs
+            sparsecuts_weight = ratio * self.args.sparselossweight_max + (1 - ratio) * self.args.sparselossweight_min
+            self.args.sparsecuts_weight = sparsecuts_weight
+        elif self.args.sparse_schedule == "cosine":
+            ratio = self.global_step/self.args.sparse_cosine_steps
+            sparsecuts_weight = self.args.stitchlossweight_max - 0.5 * (self.args.stitchlossweight_max - self.args.stitchlossweight_min) * (1 + np.cos(np.pi * ratio))
+            self.args.sparsecuts_weight = sparsecuts_weight
 
         # NOTE: pred_V should be F x 3 x 2
         gtJ = None
@@ -1153,18 +1113,18 @@ class MyNet(pl.LightningModule):
         # NOTE: stitchweights is len(valid_pairs) but weights is len(valid_edges)
         if self.args.stitchweight and self.args.softpoisson:
             if self.args.stitchweight == "stitchloss":
-                self.stitchweights[batch_idx] = 1/(lossrecord[0]['vertexseparation'] + 1e-10)
-                assert self.stitchweights.requires_grad == False
+                self.stitchweights[batch_idx] = 1/(lossrecord[0]['vertexseparation'] + 1e-8)
+                assert self.stitchweights[batch_idx].requires_grad == False
             elif self.args.stitchweight == "softweight":
                 if self.args.softpoisson == "edges":
-                    self.stitchweights[batch_idx][source.edgeidxs] = -weights
+                    self.stitchweights[batch_idx][source.edgeidxs] = weights
                 else:
-                    self.stitchweights[batch_idx] = -weights
+                    self.stitchweights[batch_idx] = weights
             elif self.args.stitchweight == "softweightdetach":
                 if self.args.softpoisson == 'edges':
-                    self.stitchweights[batch_idx][source.edgeidxs] = -weights.detach()
+                    self.stitchweights[batch_idx][source.edgeidxs] = weights.detach()
                 else:
-                    self.stitchweights[batch_idx] = -weights.detach()
+                    self.stitchweights[batch_idx] = weights.detach()
                 assert self.stitchweights[batch_idx].requires_grad == False
             else:
                 raise ValueError(f"Unknown stitchweight {self.args.stitchweight}")
@@ -1185,7 +1145,7 @@ class MyNet(pl.LightningModule):
         }
 
         if self.args.softpoisson:
-            ret['weights'] = -weights.detach().cpu().numpy()
+            ret['weights'] = weights.detach().cpu().numpy()
 
         # Need to adjust the return values if no poisson solve
         if self.args.no_poisson and len(pred_V) == len(faces):

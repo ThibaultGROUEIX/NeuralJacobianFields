@@ -76,8 +76,11 @@ def get_arg_parser():
 							action="store_true")
 	parser.add_argument("--noiseiso", help="noise the isometric embedding",
 							action="store_true")
+
+	parser.add_argument("--simplecut", help="enforce single boundary cut", action="store_true")
 	parser.add_argument("--min_cuts", type=int, help="minimum # cuts for tutte init", default=5)
 	parser.add_argument("--max_cuts", type=int, help="maximum # cuts for tutte init", default=15)
+
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
 						action="store_true")
 	parser.add_argument("--no_poisson", help="no poisson solve", action="store_true")
@@ -146,6 +149,10 @@ def get_arg_parser():
 	parser.add_argument("--vertexsep_weight", help="loss weight", default=1, type=float)
 	parser.add_argument("--distortion_weight", help = "distortion weight", default=1, type=float)
 	parser.add_argument("--sparsecuts_weight", help = "sparse cuts weight", default=1, type=float)
+	parser.add_argument("--sparselossweight_max", help = "sparse cuts weight", default=1, type=float)
+	parser.add_argument("--sparselossweight_min", help = "sparse cuts weight", default=1, type=float)
+	parser.add_argument("--sparse_schedule", choices={'linear', 'cosine'}, default=None, type=str)
+	parser.add_argument("--sparse_cosine_steps", default=None, type=int)
 
 	# Sparse cuts loss
 	parser.add_argument("--sparsecutsloss", help = "use sparse cuts loss", action="store_true")
