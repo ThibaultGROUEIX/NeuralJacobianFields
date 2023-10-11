@@ -1136,6 +1136,7 @@ def get_jacobian(vs, fs, uvmap):
 ### Get edge correspondences of soup
 # Assumes we are indexing some node array V by taking V[fs] and then flattening
 def edge_soup_correspondences(fs):
+    # TODO: Need edgecorrespondences to also map to corresponding edge index in Mesh() data structure
     from collections import defaultdict
     edgecorrespondences = defaultdict(list) # {v1, v2} (original topology) => [(v1a, v2a), (v1b, v2b)] (soup vertices indexing F*3 x 3)
     facecorrespondences = defaultdict(list) # {v1, v2} (original topology) => [f1, f2] (soup faces corresponding with edge corrs)

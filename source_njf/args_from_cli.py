@@ -175,7 +175,7 @@ def get_arg_parser():
 	parser.add_argument("--eseploss", type=str, choices={'l1', 'l2'}, help = "type of regression loss for edge sep", default="l1")
 
 	# NOTE: DEPRECATED
-	parser.add_argument("--seplossdelta", help="initial delta for edge separation loss", default=0.5, type=float)
+	parser.add_argument("--seplossdelta", help="initial delta for edge separation loss", default=0.0005, type=float)
 	parser.add_argument("--seplossdelta_min", help="min delta for edge separation loss", default=0.01, type=float)
 	parser.add_argument("--seploss_schedule", help="apply linear schedule to the separation loss delta parameter", action="store_true")
 	parser.add_argument("--lossautocut", help = "use counting loss over distortion energy", action="store_true")
