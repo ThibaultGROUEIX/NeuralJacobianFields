@@ -111,7 +111,7 @@ class UVLoss:
 
         # Cut sparsity loss
         if self.args.sparsecutsloss:
-            sparseloss = -torch.mean(weights)
+            sparseloss = parabolaloss(weights).mean()
             self.currentloss[self.count]['sparsecutsloss'] = sparseloss.detach().cpu().numpy()
             loss += self.args.sparsecuts_weight * sparseloss
 
@@ -122,6 +122,11 @@ class UVLoss:
 
     def exportloss(self):
         return self.currentloss
+
+# ==================== Edge Cut Sparsity Losses ===============================
+def parabolaloss(weights):
+    """ Penalizes weights at 0.5 and none at 0/1. Min 0 and max 1 assuming weights are in [0,1]. """
+    return -4 * (weights - 0.5) ** 2 + 1
 
 # ==================== Distortion Energies ===============================
 # TODO: batch this across multiple meshes
@@ -214,21 +219,6 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
     e_p_full = torch.stack([e1_p, e2_p, e3_p])
     crosscov = torch.sum(cot_full * torch.matmul(e_full.unsqueeze(3), e_p_full.unsqueeze(2)), dim=0)
     crosscov = crosscov.reshape(crosscov.shape[0], 4) # F x 4
-
-    # tdenom = torch.clamp(crosscov[:,0]**2 + crosscov[:,1]**2 - crosscov[:,2]**2 - crosscov[:,3]**2, min=1e-5)
-    # pdenom = torch.clamp(crosscov[:,0]**2 - crosscov[:,1]**2 + crosscov[:,2]**2 - crosscov[:,3]**2, min=1e-5)
-    # theta = torch.atan2(2 * crosscov[:,0] * crosscov[:,2] + 2 * crosscov[:,1] * crosscov[:,3], tdenom)/2
-    # phi = torch.atan2(2 * crosscov[:,0] * crosscov[:,1] + 2 * crosscov[:,2] * crosscov[:,3], pdenom)/2
-
-    # cphi = torch.cos(phi)
-    # sphi = torch.sin(phi)
-    # ctheta = torch.cos(theta)
-    # stheta = torch.sin(theta)
-    # s1 = () * + () *
-    # s2 = () * + () *
-
-    # U = torch.stack([torch.stack([ctheta, -stheta], dim=1), torch.stack([stheta, ctheta], dim=1)], dim=2)
-    # V = torch.stack([torch.stack([torch.cos(phi), -torch.sin(phi)], dim=1), torch.stack([torch.sin(phi), torch.cos(phi)], dim=1)], dim=2)
 
     E = (crosscov[:,0] + crosscov[:,3])/2
     F = (crosscov[:,0] - crosscov[:,3])/2
@@ -402,9 +392,9 @@ def stitchingloss(vs, fs, uv, losstypes, args, stitchweights=None, edgeidxs=None
                 elens = torch.ones(len(edgeidxs), device=uv.device)
 
             if args.seamlessedgecut:
-                edgecutloss = stitchweights[edgeidxs] * seamlessvertexsep[edgeidxs] * elens * args.edgecut_weight
+                edgecutloss = stitchweights[edgeidxs] * seamlessvertexsep[edgeidxs] * elens/torch.sum(elens) * args.edgecut_weight
             else:
-                edgecutloss = stitchweights[edgeidxs] * vertexsep[edgeidxs] * elens * args.edgecut_weight
+                edgecutloss = stitchweights[edgeidxs] * vertexsep[edgeidxs] * elens/torch.sum(elens) * args.edgecut_weight
 
             lossdict[losstype] = edgecutloss
             weightdict[losstype] = args.edgecut_weight

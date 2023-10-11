@@ -40,18 +40,14 @@ def get_arg_parser():
 	parser.add_argument('--sparsepoisson', action="store_true")
 	parser.add_argument("--spweight", choices={'sigmoid', 'seamless', 'cosine'}, type=str,
 						help = "how to map dot product to soft poisson weights", default='cosine')
-	parser.add_argument("--fft",
-							help='fourier features',
-							action="store_true")
-	parser.add_argument("--fft_dim", type=int,
-							help='fourier features dimension',
-							default=256)
-	parser.add_argument("--facedim", type=int,
-							help='face latent dimension',
+	parser.add_argument("--fft", type=int,
 							default=0)
-	parser.add_argument("--facediminit", type=float,
-							help='value to initialize weights of face latent linear layer',
-							default=None)
+	parser.add_argument("--fftscale", type=int,
+							help='fft scale',
+							default=10)
+	parser.add_argument("--facedim", type=int,
+								help='face latent dimension',
+								default=3)
 	parser.add_argument("--noencoder", help="no encoder. TURN THIS ON IF YOU DONT WANT TO TRAIN THE ENCODER",action="store_true")
 
 	### TRAINING
@@ -122,7 +118,7 @@ def get_arg_parser():
 	parser.add_argument("--hardpoisson", type=str, choices={'loss', 'weight'}, help = "cutting options for hard poisson",
 						default=None)
 	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
-	parser.add_argument("--weightcuteps", help="epsilon for edge stitching post-process (for pred weights)", default=1e-5, type=float)
+	parser.add_argument("--weightcuteps", help="epsilon for edge stitching post-process (for pred weights)", default=1e-3, type=float)
 
 
 	parser.add_argument("--opttrans", help = "predict l0 translation and visualize", action="store_true")
@@ -136,6 +132,8 @@ def get_arg_parser():
 						choices={'l1', 'l2'})
 	parser.add_argument("--stitchweight", choices={'stitchloss', 'softweight', 'softweightdetach'},
 						help = "iterative reweighting of the stitching loss", default=None)
+	parser.add_argument("--ignorei", help = "cone cutting experiment", default=0,
+						type = int)
 
 	# Seamless
 	parser.add_argument("--seamlessvertexsep", help = "use counting loss over distortion energy", action="store_true")

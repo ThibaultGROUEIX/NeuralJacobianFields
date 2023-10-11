@@ -184,7 +184,7 @@ class DeformationDataset(Dataset):
         else:
             source = SourceMesh(self.args, source_index, join(self.directory, 'cache', f"{source_index}_{ind}"), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
                                 random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
-                                initjinput = self.args.initjinput, fft=self.args.fft, fft_dim=self.args.fft_dim,
+                                initjinput = self.args.initjinput, fft=self.args.fft, fftscale=self.args.fftscale,
                                 flatten=self.args.dense, debug=self.args.debug, top_k_eig=self.args.top_k_eig)
             new_init = None
             if self.args.ninit == -1:

@@ -11,9 +11,12 @@ from pathlib import Path
 import dill as pickle
 from collections import defaultdict
 import torch
+from PIL import Image
 
 parser = argparse.ArgumentParser()
 
+parser.add_argument("--debug",
+                    action='store_true', default=False)
 parser.add_argument("--objdir",
                     help='path to obj file to optimize for',
                     type = str, default='./data/tetrahedron.obj')
@@ -21,8 +24,10 @@ parser.add_argument("--savename",
                     help='name of experiment',
                     type = str, default=None)
 parser.add_argument("--niters",
-                    type = int, default=50000)
-parser.add_argument("--init", type=str, choices={'slim', 'isometric'},
+                    type = int, default=20000)
+parser.add_argument("--ignorei",
+                    type = int, default=0)
+parser.add_argument("--init", type=str, choices={'slim', 'isometric','tutte'},
                     default='slim')
 parser.add_argument("--vertexseploss",
                     action='store_true', default=False)
@@ -36,7 +41,7 @@ parser.add_argument("--edgecutloss", type=str, choices={'vertexsep', 'seamless'}
 parser.add_argument("--jmatchloss",
                     action='store_true', default=False)
 parser.add_argument("--distortionloss", type=str, choices={"symmetricdirichlet", "arap"},
-                    default="symmetricdirichlet")
+                    default="arap")
 parser.add_argument("--weightloss",
                     action='store_true', default=False)
 parser.add_argument("--seamless",
@@ -85,11 +90,12 @@ soupvs = torch.from_numpy(ogfverts.reshape(-1, 3)).double().to(device)
 soupfs = torch.arange(len(soupvs)).reshape(-1, 3).long()
 
 # Initialize the UV/Jacobians
-from source_njf.utils import tutte_embedding, get_jacobian_torch, SLIM, get_local_tris
+from source_njf.utils import tutte_embedding, get_jacobian_torch, SLIM, get_local_tris, make_cut
 vertices = torch.from_numpy(mesh.vertices).double().to(device)
 faces = torch.from_numpy(mesh.faces).long().to(device)
 fverts = vertices[faces]
 
+ignoreset = []
 if args.init == "slim":
     ## Enforce disk topology
     if len(mesh.topology.boundaries) == 0:
@@ -103,17 +109,49 @@ elif args.init == "isometric":
     vertices = fverts.reshape(-1, 3).double()
     faces = torch.arange(len(vertices)).reshape(-1, 3).long().to(device)
     inituv = get_local_tris(vertices, faces, device=device).reshape(-1, 2).double()
+elif args.init == "tutte":
+    ## ==== DEBUGGING: manually set some edges to cut in the initialization ====
+    ignore_edges = [298, 464, 555, 301, 304, 605, 456, 46,717,552,700,699,692, 691,
+            647, 190, 16, 200, 761, 757, 342, 662, 577, 122, 510, 79, 20]
+    ignoreset = ignore_edges[:args.ignorei]
+    if len(ignoreset) > 0:
+        cutvs = []
+        for i in range(len(ignoreset)):
+            e = ignoreset[i]
+            twovs = [v.index for v in mesh.topology.edges[e].two_vertices()]
+            if i == 0:
+                if not mesh.topology.vertices[twovs[0]].onBoundary():
+                    assert mesh.topology.vertices[twovs[1]].onBoundary()
+                    twovs = twovs[::-1]
+            cutvs.extend(twovs)
+        _, idx = np.unique(cutvs, return_index = True)
+        cutvs = np.array(cutvs)[np.sort(idx).astype(int)]
+        make_cut(mesh, cutvs)
+
+        # Unit test: mesh is still connected
+        cutvs, cutfs, cutes = mesh.export_soup()
+        testsoup = PolygonSoup(cutvs, cutfs)
+        n_components = testsoup.nConnectedComponents()
+        assert n_components == 1, f"After cutting found {n_components} components!"
+
+        # Only replace Tutte if no nan
+        vertices = torch.from_numpy(mesh.vertices).double().to(device)
+        faces = torch.from_numpy(mesh.faces).long().to(device)
+        inituv = torch.from_numpy(tutte_embedding(cutvs, cutfs)).unsqueeze(0).to(device) # 1 x F x 2
+    else:
+        inituv = torch.from_numpy(tutte_embedding(mesh.vertices, mesh.faces)).unsqueeze(0).to(device) # 1 x F x 2
 
 # Get Jacobians
-initj = get_jacobian_torch(vertices, faces, inituv, device=device).to(device) # F x 2 x 3
-initj = torch.cat((initj, torch.zeros((initj.shape[0], 1, 3), device=device)), axis=1) # F x 3 x 3
+initj = get_jacobian_torch(vertices, faces, inituv, device=device).double() # F x 2 x 3
+initj = torch.cat((initj, torch.zeros((initj.shape[0], 1, 3), device=device)), axis=1).double() # F x 3 x 3
 initj.requires_grad_()
 
 # Sanity check: jacobians return original isosoup up to global translation
 pred_V = fverts @ initj[:,:2,:].transpose(2, 1)
-diff = pred_V - inituv[faces]
+diff = pred_V - inituv[0, faces]
 diff -= torch.mean(diff, dim=1, keepdims=True) # Removes effect of per-triangle clobal translation
 torch.testing.assert_close(diff, torch.zeros_like(diff), atol=1e-5, rtol=1e-4)
+inituv = inituv.squeeze()
 
 # Compute differential operators for triangle soup
 dim = 3
@@ -128,9 +166,9 @@ rhs = rhs.todense()
 laplace = np.array((grad.T@mass@grad).todense())
 
 ## Update diagonal of Laplacian such that rows sum to 0
-laplace = laplace - np.diag(np.sum(laplace, axis=1))
+np.fill_diagonal(laplace, 0)
+laplace[range(len(laplace)), range(len(laplace))] = -np.sum(laplace, axis=1)
 np.testing.assert_allclose(np.sum(laplace, axis=1), 0, atol=1e-4)
-
 grad = grad.todense()
 
 ## Convert to torch tensors
@@ -158,21 +196,30 @@ for ogv, vlist in sorted(vcorrespondences.items()):
     valid_pairs.extend(list(combinations(vlist, 2)))
 
 # Need edge to soup pairs to visualize cuts
-from source_njf.utils import get_edge_pairs
+from source_njf.utils import get_edge_pairs, edge_soup_correspondences
 valid_edge_pairs, valid_edges_to_soup, edgeidxs, edgededupidxs, edges, elens, facepairs = get_edge_pairs(mesh, valid_pairs, device=device)
+
+keep_edgeidxs = []
+keepidxs = []
+keepelens = []
+for i in range(len(edges)):
+    if edges[i] not in ignoreset:
+        keep_edgeidxs.append(i)
+        keepidxs.append(edgeidxs[i])
+        keepelens.append(elens[i])
+keepelens = torch.tensor(keepelens, device=device).double()
 
 # Initialize random weights
 from source_njf.losses import vertexseparation, symmetricdirichlet, uvgradloss, arap
 from source_njf.utils import get_jacobian_torch, clear_directory
 
-jacweight = 10
+jacweight = 1
 distweight = 1
 sparseweight = 1
 seplossdelta = args.seplossdelta
 weight_idxs = (torch.tensor([pair[0] for pair in valid_pairs]).to(device), torch.tensor([pair[1] for pair in valid_pairs]).to(device))
 if args.edgeweightonly:
     weight_idxs = (torch.tensor([pair[0] for pair in valid_edge_pairs]).to(device), torch.tensor([pair[1] for pair in valid_edge_pairs]).to(device))
-# weights = (torch.rand(len(weight_idxs[0])) - 0.5) * 4 # -2 to 2
 
 objname = os.path.basename(datadir).split(".")[0]
 if args.savename is None:
@@ -220,16 +267,72 @@ if args.continuetrain and os.path.exists(os.path.join(screendir, "weights.pt")) 
     print(f"\n============ Continuing optimization from epoch {starti} ===========\n")
 else:
     clear_directory(screendir)
-    weights = torch.zeros(len(weight_idxs[0])).to(device).double()
-    weights.requires_grad_()
-    optim = torch.optim.Adam([weights, initj], lr=args.lr)
+    weights = torch.ones(len(weight_idxs[0])).to(device).double() * -5
     starti = 0
     lossdict = defaultdict(list)
     stitchweight = torch.ones(len(weights)).double().to(device)
     edgeweight = torch.ones(len(edgeidxs)).double().to(device)
 
+    # Initialization weights based on the initial cut
+    if len(ignoreset) > 0:
+        newvcorrespondences = vertex_soup_correspondences(cutfs)
+        new_valid_pairs = []
+        for ogv, vlist in sorted(newvcorrespondences.items()):
+            new_valid_pairs.extend(list(combinations(vlist, 2)))
+        new_valid_pairs = [set(pair) for pair in new_valid_pairs]
+
+        if args.edgeweightonly:
+            checkvalid = [set(pair) for pair in valid_edge_pairs]
+        else:
+            checkvalid = [set(pair) for pair in valid_pairs]
+
+        for i in range(len(checkvalid)):
+            if checkvalid[i] in new_valid_pairs:
+                    weights[i] = 1
+    weights.requires_grad_()
+    optim = torch.optim.Adam([weights, initj], lr=args.lr)
+
 framedir = os.path.join(screendir, "frames")
 Path(framedir).mkdir(parents=True, exist_ok=True)
+
+id = None
+if args.continuetrain:
+    import re
+    if os.path.exists(os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')):
+        for idfile in os.listdir(os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')):
+            if idfile.endswith(".wandb"):
+                result = re.search(r'run-([a-zA-Z0-9]+)', idfile)
+                if result is not None:
+                    id = result.group(1)
+                    break
+    else:
+        print(f"Warning: No wandb record found in {os.path.join(args.outputdir, args.expname, 'wandb', 'latest-run')}!. Starting log from scratch...")
+
+import wandb
+
+c = wandb.wandb_sdk.wandb_artifacts.get_artifacts_cache()
+c.cleanup(int(1e9))
+
+id = None
+if args.continuetrain:
+    import re
+    if os.path.exists(os.path.join(savedir, args.savename, 'wandb', 'latest-run')):
+        for idfile in os.listdir(os.path.join(savedir, args.savename, 'wandb', 'latest-run')):
+            if idfile.endswith(".wandb"):
+                result = re.search(r'run-([a-zA-Z0-9]+)', idfile)
+                if result is not None:
+                    id = result.group(1)
+                    break
+    else:
+        print(f"Warning: No wandb record found in {os.path.join(savedir, args.savename, 'wandb', 'latest-run')}!. Starting log from scratch...")
+
+wandb.login()
+run = wandb.init(project='conetest_opt', name=args.savename, dir=os.path.join(savedir, args.savename),
+                    mode= "offline" if args.debug else "online", id = id)
+wandb.define_metric("iteration")
+wandb.define_metric("loss", step_metric="iteration")
+wandb.define_metric("stitchingloss", step_metric="iteration")
+wandb.define_metric("araploss", step_metric="iteration")
 
 if not cluster:
     ### Screenshot initialization mesh and UV
@@ -255,7 +358,7 @@ else:
     plot_uv(screendir, f"inituv", inituv.detach().cpu().numpy(),  faces.detach().cpu().numpy(), losses=None,
             facecolors = np.arange(len(soupfs))/(len(soupfs)-1))
 
-for i in range(starti, args.niters):
+for iteration in range(starti, args.niters):
     # Weights need to be negative going into laplacian
     cweights = -torch.sigmoid(weights)
 
@@ -307,7 +410,8 @@ for i in range(starti, args.niters):
     pin_input = input_to_solve
 
     # Diagonal needs to be equal to sum of pair weights for each row
-    pinlaplace = pinlaplace - torch.diag(torch.sum(pinlaplace, dim=1))
+    pinlaplace.fill_diagonal_(0)
+    pinlaplace[range(len(pinlaplace)), range(len(pinlaplace))] = -torch.sum(pinlaplace, dim=1)
     torch.testing.assert_close(torch.sum(pinlaplace, dim=1), torch.zeros(pinlaplace.shape[0], device=device, dtype=pinlaplace.dtype), atol=1e-4, rtol=1e-4)
 
     # Solve with pinned vertices
@@ -325,10 +429,10 @@ for i in range(starti, args.niters):
     loss = 0
 
     # NOTE: Order is wrt weights order (both follow vpairs)
-    separationloss = torch.sum(vertexseparation(ogvertices, ogfaces, full_uvs, loss=args.vertexseptype), dim=1)
-
-    if args.vertexsepsqrt:
-        separationloss = torch.sqrt(separationloss)
+    # TODO: New edge separation loss should be avg(L2 of corresponding vertices) (E x 1 array)
+    # TODO: Just choose the functional form of the edge separation loss such that GT is lower energy than the local minima!
+    separationloss = torch.sum(vertexseparation(ogvertices, ogfaces, full_uvs, loss='l2'), dim=1)
+    separationloss = torch.sqrt(separationloss)
 
     # Continual L0
     if args.seamless:
@@ -344,58 +448,37 @@ for i in range(starti, args.niters):
                 weightedseparationloss = stitchweight * separationloss
 
             loss += torch.mean(weightedseparationloss)
-            lossdict['Vertex Separation Loss'].append(torch.mean(weightedseparationloss).item())
+            lossdict['Vertex Separation Loss'].append(weightedseparationloss.detach().cpu().numpy())
         else:
             if args.seamless:
                 loss += torch.mean(seamlessloss)
             else:
                 loss += torch.mean(separationloss)
-            lossdict['Vertex Separation Loss'].append(torch.mean(separationloss).item())
+            lossdict['Vertex Separation Loss'].append(separationloss.detach().cpu().numpy())
 
     if args.edgecutloss:
-        if args.edgecutloss == "seamless":
-            if args.seamless:
-                # No need to transform separationloss then
-                edgecutloss = seamlessloss[edgeidxs] * elens * args.edgecutweight
-            else:
-                seamlessloss = (separationloss * separationloss)/(separationloss * separationloss + seplossdelta)
-                edgecutloss = seamlessloss[edgeidxs] * elens * args.edgecutweight
-        elif args.edgecutloss == "vertexsep":
-            edgecutloss = separationloss[edgeidxs] * elens * args.edgecutweight
-        else:
-            raise NotImplementedError(f"{args.edgecutloss} for edge loss not implemented")
+        # Remove the cut from the loss
+        edgecutloss = separationloss[keepidxs] * keepelens/torch.sum(keepelens)
 
         if args.edgeweight:
             edgecutloss = edgecutloss * edgeweight
 
         loss += torch.mean(edgecutloss)
-        lossdict['Edge Cut Loss'].append(torch.mean(edgecutloss).item())
-
-    # if args.edgegradloss:
-    #     edgegradloss, edgecorrespondences = uvgradloss(ogvertices, ogfaces, full_uvs, return_edge_correspondence=True, loss='l2')
-
-    #     # Continual L0
-    #     edgegradloss = (edgegradloss * edgegradloss)/(edgegradloss * edgegradloss + seplossdelta)
-    #     loss += torch.mean(edgegradloss)
-
-    #     lossdict['Edge Gradient Loss'].append(torch.mean(edgegradloss).item())
+        lossdict['Edge Cut Loss'].append(edgecutloss.detach().cpu().numpy())
 
     poisj = get_jacobian_torch(soupvs, soupfs, full_uvs, device=device)
-    # if args.jmatchloss:
-    #     # Jacobian matching loss
-    #     jacobloss = torch.nn.functional.mse_loss(poisj, initj[:, :2, :].detach(), reduction='none')
-    #     loss += jacweight * torch.mean(jacobloss)
-    #     lossdict['Jacobian Matching Loss'].append((jacweight * torch.mean(jacobloss)).item())
 
     if args.distortionloss:
         # Distortion loss on poisson solved jacobians
         if args.distortionloss == "symmetricdirichlet":
-            distortionloss = symmetricdirichlet(ogvertices, ogfaces, poisj)
+            distortionloss = symmetricdirichlet(ogvertices, ogfaces, poisj,
+                                                )
         if args.distortionloss == "arap":
-            distortionloss = arap(ogvertices, ogfaces, full_uvs, paramtris=full_uvs[soupfs], device=device)
+            distortionloss = arap(ogvertices, ogfaces, full_uvs, paramtris=full_uvs[soupfs], device=device,
+                                  return_face_energy=True)
 
         loss += distweight * torch.mean(distortionloss)
-        lossdict['Distortion Loss'].append((distweight * torch.mean(distortionloss)).item())
+        lossdict['Distortion Loss'].append(distweight * distortionloss.detach().cpu().numpy())
 
     if args.weightloss:
         # Weight max loss (want to make sum of weights as high as possible (minimize cuts))
@@ -407,19 +490,18 @@ for i in range(starti, args.niters):
     loss.backward()
     lossdict['Total Loss'].append(loss.item())
 
-    # Sanity check: cweight gradients
-    # print(f"Cweight gradients: {cweights.grad}")
-    # print(f"Weight gradients: {weights.grad}")
-    # print(f"Jacobian gradients: {initj.grad}")
-
     optim.step()
     optim.zero_grad()
 
-    print(f"========== Done with iteration {i}. ==========")
+    print(f"========== Done with iteration {iteration}. ==========")
     lossstr = ""
     for k, v in lossdict.items():
-        lossstr += f"{k}: {v[-1]:0.7f}. "
+        lossstr += f"{k}: {np.mean(v[-1]):0.7f}. "
     print(lossstr)
+
+    wandb.log({'total_loss': lossdict['Total Loss'][-1], 'arap_loss': lossdict['Distortion Loss'][-1],
+               'stitching_loss': lossdict['Edge Cut Loss'][-1], 'iteration': iteration}, step=iteration, commit=True)
+
 
     # Also print quantile of stitching weights if applicable
     if args.stitchweight:
@@ -429,15 +511,22 @@ for i in range(starti, args.niters):
     # print(f"Weights: {weights.detach()}")
     # print()
 
-    # Visualize every 1000 epochs
-    if i % 1000 == 0:
+    # Visualize every 100 epochs
+    if iteration % 100 == 0:
+        # Convert loss dict keys
+        lossdict_convert = {'Edge Cut Loss': 'edgecutloss', 'Distortion Loss': 'arap_loss'}
+        lossdict_viz = {}
+        for key, item in lossdict.items():
+            if key in lossdict_convert:
+                lossdict_viz[lossdict_convert[key]] = item[-1]
+
         if not cluster:
             ps.init()
             ps.remove_all_structures()
             # ps_mesh = ps.register_surface_mesh("mesh", soupvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(), edge_width=1)
             ps_uv = ps.register_surface_mesh("uv mesh", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(), edge_width=1)
             ps_uv.add_scalar_quantity('corr', np.arange(len(soupfs)), defined_on='faces', enabled=True, cmap='viridis')
-            ps.screenshot(os.path.join(framedir, f"uv_{i:06}.png"), transparent_bg=True)
+            ps.screenshot(os.path.join(framedir, f"uv_{iteration:06}.png"), transparent_bg=True)
         else:
             # Get cut edge pairs
             edges = None
@@ -447,7 +536,6 @@ for i in range(starti, args.niters):
             cutvidxs = np.where(edgestitchcheck > args.cuteps)[0]
             cutsoup = [valid_edges_to_soup[vi] for vi in cutvidxs]
 
-            # TODO: map colors based on cutvidxs instead (fixes the edge correspondences every iter)
             edgecolors = np.repeat(cutvidxs, 2)/(len(edgestitchcheck)-1)
             edges = []
             for souppair in cutsoup:
@@ -457,8 +545,102 @@ for i in range(starti, args.niters):
                 edges = np.stack(edges, axis=0)
                 edgecolors = np.array(edgecolors)/np.max(edgecolors)
 
-            plot_uv(framedir, f"uv_{i:06}", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(), losses=None,
+            plot_uv(framedir, f"uv_{iteration:06}", full_uvs.detach().cpu().numpy(), soupfs.detach().cpu().numpy(),
+                    losses=lossdict_viz,
                     facecolors = np.arange(len(soupfs))/(len(soupfs)-1), edges=edges, edgecolors=edgecolors)
+
+            imagepaths = [os.path.join(framedir, f"uv_{iteration:06}.png")] + \
+                        [os.path.join(framedir, f"{key}_uv_{iteration:06}.png") for key in lossdict_viz.keys() if "loss" in key]
+            images = [wandb.Image(Image.open(x) for x in imagepaths)]
+            wandb.log({'uvs': images}, step=iteration, commit=True)
+
+            # Mesh Energies
+            for key, val in lossdict_viz.items():
+                if "loss" in key: # Hacky way of avoiding aggregated values
+                    if key == "edgecutloss":
+                        from collections import defaultdict
+                        valid_edges_to_soup = [valid_edges_to_soup[i] for i in keep_edgeidxs]
+                        edgecutloss = val # edgeidxs x 1
+
+                        ### Roadmap
+                        # For each og edge: get avg of the 2 corresponding edge cut vals + get the two soup edges
+                        soupedgedict = defaultdict(list)
+                        for i in range(len(valid_edges_to_soup)):
+                            soupkey = frozenset((frozenset(valid_edges_to_soup[i][0]), frozenset(valid_edges_to_soup[i][1])))
+                            edgevals = soupedgedict[soupkey]
+                            if len(edgevals) >= 2:
+                                raise ValueError("More than 2 valid edges associated with souppair!")
+
+                            # NOTE: Only need this check because sometimes we test what happens when we remove edges from loss
+                            edgevals.append(edgecutloss[i])
+
+                        # Plot edges if given
+                        ogvs = ogvertices.detach().cpu().numpy()
+                        ogfs = ogfaces.detach().cpu().numpy()
+                        ogvsoup = ogvs[ogfs].reshape(-1, 3)
+                        cylindervals = []
+                        cylinderpos = []
+                        for soupkey, edgecutval in soupedgedict.items():
+                            p0 = list(list(soupkey)[0])
+                            edgeval = np.mean(edgecutval)
+                            cylindervals.append([edgeval, edgeval])
+                            cylinderpos.append(ogvsoup[p0])
+                        cylinderpos = np.stack(cylinderpos, axis=0)
+                        cylindervals = np.array(cylindervals)
+
+                        export_views(ogvs, ogfs, framedir, filename=f"{key}_mesh_{iteration:06}.png",
+                                    plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
+                                    cylinder_scalars=cylindervals, outline_width=0.01,
+                                    device="cpu", n_sample=30, width=200, height=200,
+                                    vmin=0, vmax=0.1, shading=False)
+                    else:
+                        export_views(ogvertices.detach().cpu().numpy(), ogfaces.detach().cpu().numpy(),
+                                     framedir, filename=f"{key}_mesh_{iteration:06}.png",
+                                        plotname=f"Avg {key}: {np.mean(val):0.4f}",
+                                        fcolor_vals=val, device="cpu", n_sample=30, width=200, height=200,
+                                        vmin=0, vmax=0.6, shading=False)
+
+            imagepaths = [os.path.join(framedir, f"{key}_mesh_{iteration:06}.png") for key in lossdict_viz.keys() if "loss" in key]
+            images = [wandb.Image(Image.open(x) for x in imagepaths)]
+            wandb.log({'mesh energies': images}, step=iteration, commit=True)
+
+            # Weights
+            # NOTE: below results in 2x each cylinder but it's fine
+            cweights_detach = -cweights.detach().cpu().numpy()
+            edgecorrespondences, facecorrespondences = edge_soup_correspondences(ogfaces.detach().cpu().numpy())
+            soupvedge_to_ogvedge = {}
+            for k, v in edgecorrespondences.items():
+                if len(v) > 1:
+                    soupvedge_to_ogvedge[tuple(sorted([v[0][0], v[1][0]]))] = list(k)
+                    soupvedge_to_ogvedge[tuple(sorted([v[0][1], v[1][1]]))] = list(k)
+
+            cylinderpos = []
+            for vpair in valid_edge_pairs:
+                cylinderpos.append(ogvs[soupvedge_to_ogvedge[tuple(sorted(vpair))]])
+            cylinderpos = np.stack(cylinderpos, axis=0)
+            cylindervals = np.stack([cweights_detach, cweights_detach], axis=1) # len(edgeidxs) = # edges x 2
+
+            export_views(ogvertices.detach().cpu().numpy(), ogfaces.detach().cpu().numpy(),
+                         framedir, filename=f"weights_mesh_{iteration:06}.png",
+                        plotname=f"Edge Weights", cylinders=cylinderpos,
+                        cylinder_scalars=cylindervals,
+                        outline_width=0.01, cmap = plt.get_cmap('Reds_r'),
+                        device="cpu", n_sample=30, width=200, height=200,
+                        vmin=0, vmax=1, shading=False)
+
+            # Histogram of weights
+            import matplotlib.pyplot as plt
+            fig, axs = plt.subplots()
+            # plot ours
+            axs.set_title(f"Iteration {iteration:06}: SP Weights")
+            axs.hist(cweights_detach, bins=20)
+            plt.savefig(os.path.join(framedir, f"weights_{iteration:06}.png"))
+            plt.close(fig)
+            plt.cla()
+
+            imagepaths = [os.path.join(framedir, f"weights_mesh_{iteration:06}.png"), os.path.join(framedir, f"weights_{iteration:06}.png")]
+            images = [wandb.Image(Image.open(x) for x in imagepaths)]
+            wandb.log({'edge weights': images}, step=iteration, commit=True)
 
         # Save most recent stuffs
         torch.save(weights.detach().cpu(), os.path.join(screendir, "weights.pt"))
@@ -467,17 +649,6 @@ for i in range(starti, args.niters):
         if args.stitchweight:
             torch.save(stitchweight.detach().cpu(), os.path.join(screendir, "stitchweight.pt"))
 
-            # Plot stitch weight as histogram
-            # import matplotlib.pyplot as plt
-            # fig, axs = plt.subplots()
-            # # plot ours
-            # axs.set_title(f"{i:06}: Stitch Weights")
-            # axs.hist(stitchweight.detach().cpu().numpy(), bins=20)
-            # plt.savefig(os.path.join(framedir, f"sweight_{i:06}.png"))
-            # plt.close(fig)
-            # plt.cla()
-
-
         with open(os.path.join(screendir, "epoch.pkl"), 'wb') as f:
             pickle.dump(i, f)
 
@@ -485,15 +656,15 @@ for i in range(starti, args.niters):
             pickle.dump(lossdict, f)
 
 # Plot loss curves
-import matplotlib.pyplot as plt
-for k, v in lossdict.items():
-    fig, axs = plt.subplots()
-    axs.plot(np.arange(len(v)), v)
-    axs.set_title(k)
+# import matplotlib.pyplot as plt
+# for k, v in lossdict.items():
+#     fig, axs = plt.subplots()
+#     axs.plot(np.arange(len(v)), v)
+#     axs.set_title(k)
 
-    lossname = k.replace(" ", "_").lower()
-    plt.savefig(os.path.join(screendir, f"{lossname}.png"))
-    plt.cla()
+#     lossname = k.replace(" ", "_").lower()
+#     plt.savefig(os.path.join(screendir, f"{lossname}.png"))
+#     plt.cla()
 
 # Save final UVs, weights, and jacobians
 np.save(os.path.join(screendir, "uv.npy"), full_uvs.detach().cpu().numpy())
@@ -651,12 +822,5 @@ imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
 imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
         save_all=True, duration=20, loop=0, disposal=2)
 
-# GIF for stitch weights if given
-# if args.stitchweight:
-#     fp_in = f"{framedir}/sweight_*.png"
-#     fp_out = f"{screendir}/stitchweight.gif"
-#     imgs = [Image.open(f) for f in sorted(glob.glob(fp_in))]
-
-#     # Resize images
-#     imgs[0].save(fp=fp_out, format='GIF', append_images=imgs[1:],
-#             save_all=True, duration=20, loop=0, disposal=2)
+# Wandb log
+wandb.log({"uv opt": wandb.Video(f"{screendir}/uv.gif", fps=30, format='gif')})

@@ -66,9 +66,12 @@ class MyNet(pl.LightningModule):
         if self.args.softpoisson:
             assert face_dim > 0, f"face_dim must be > 0 for soft poisson. face_dim: {face_dim}."
 
+            # TODO: Try fourier features
             # NOTE: Dimension of output depends on max of # edge weights being predicted across dataset
             output_dim = 9 + face_dim
-            self.per_face_decoder = nn.Sequential(nn.Linear(point_dim + code_dim, 128),
+            input_dim = point_dim + code_dim
+
+            self.per_face_decoder = nn.Sequential(nn.Linear(input_dim, 128),
                                                   nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
                                                   nn.ReLU(),
                                                   nn.Linear(128, 128),
@@ -184,16 +187,16 @@ class MyNet(pl.LightningModule):
 
         # for layer in self.per_face_decoder:
         #     if isinstance(layer, nn.Linear):
-        #         torch.nn.init.xavier_normal_(layer.weight)
+        #         torch.nn.init.uniform_(layer.weight, a=-2, b=2)
 
         self.__IDENTITY_INIT = self.args.identity
         if self.__IDENTITY_INIT:
             self.per_face_decoder[-1].bias.data[:9].zero_()
             self.per_face_decoder[-1].weight.data[:9].zero_()
 
-            # if self.args.facediminit:
-            #     self.per_face_decoder[-1].bias.data[9:] = self.args.facediminit
-            #     self.per_face_decoder[-1].weight.data[9:] = self.args.facediminit
+        # NOTE: Initialize face latent weights to zero
+        # self.per_face_decoder[-1].bias.data[9:].zero_()
+        # self.per_face_decoder[-1].weight.data[9:].zero_()
 
         self.__global_trans = self.args.globaltrans
         if self.__global_trans:
@@ -629,32 +632,11 @@ class MyNet(pl.LightningModule):
 
         ### Visualizations
         lossdict = batch_parts['lossdict']
+        subidxs = batch_parts['keepidxs']
 
         # Construct mesh
         mesh = Mesh(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"])
 
-        # NOTE: BELOW DEPRECATED -- we save the edge correspondences when we compute the edge losses!
-        # Ftoe matrix
-        # # Face to edges map
-        # ftoe = computeFacetoEdges(mesh)
-
-        # # Remap indexing to ignore the boundaries
-        # neweidx = []
-        # oldeidx = []
-        # count = 0
-        # for key, edge in sorted(mesh.topology.edges.items()):
-        #     if not edge.onBoundary():
-        #         neweidx.append(count)
-        #         oldeidx.append(edge.index)
-        #         count += 1
-        # ebdtoe = np.zeros(np.max(list(mesh.topology.edges.keys())) + 1)
-        # ebdtoe[oldeidx] = neweidx
-        # ebdtoe = ebdtoe.astype(int)
-
-        # new_ftoe = []
-        # for es in ftoe:
-        #     new_ftoe.append(ebdtoe[es])
-        # ftoe = new_ftoe
 
         # Log losses
         for key, val in lossdict[0].items():
@@ -777,12 +759,14 @@ class MyNet(pl.LightningModule):
                     plot_uv(save_path, f"epoch {self.current_epoch:05} batch {idx:05}", batch_parts["pred_V"][idx].squeeze().detach().cpu().numpy(),
                             batch_parts["T"][idx].squeeze(), losses=lossdict[idx], cmin=0, cmax=2,
                             facecolors = np.arange(len(batch_parts["T"][idx].squeeze()))/(len(batch_parts["T"][idx].squeeze())),
-                            edges = edges, edgecolors = edgecolors, edgecorrespondences=source.edgecorrespondences, source=source)
+                            edges = edges, edgecolors = edgecolors, edgecorrespondences=source.edgecorrespondences, source=source,
+                            subidxs = subidxs)
             else:
                 plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
                         batch_parts["T"].squeeze(), losses=lossdict[0], cmin=0, cmax=2,
                         facecolors = np.arange(len(batch_parts["T"].squeeze()))/(len(batch_parts["T"].squeeze())),
-                        edges = edges, edgecolors = edgecolors, edgecorrespondences=source.edgecorrespondences, source=source)
+                        edges = edges, edgecolors = edgecolors, edgecorrespondences=source.edgecorrespondences, source=source,
+                        subidxs = subidxs)
 
             # Log the plotted imgs
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
@@ -874,7 +858,7 @@ class MyNet(pl.LightningModule):
 
                 plot_uv(save_path, f"hard poisson epoch {self.current_epoch:05} seam length {np.sum(seamlengths):04f}", hardpoisson_uv,
                             cutfs, losses={'distortionloss': distortionenergy.detach().cpu().numpy()},
-                            edges = hp_edges, edgecolors=hp_ecolors,
+                            edges = hp_edges, edgecolors=hp_ecolors, subidxs = subidxs,
                             facecolors = np.arange(len(cutfs))/(len(cutfs)))
 
                 images = [os.path.join(save_path, f"hard_poisson_epoch_{self.current_epoch:05}_seam_length_{np.sum(seamlengths):04f}.png")] + \
@@ -914,6 +898,7 @@ class MyNet(pl.LightningModule):
                 cylinderpos.append(ogvs[soupvedge_to_ogvedge[tuple(sorted(vpair))]])
             cylinderpos = np.stack(cylinderpos, axis=0)
             cylindervals = np.stack([weights, weights], axis=1) # len(edgeidxs) = # edges x 2
+
             export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weights_mesh_{self.current_epoch:05}.png",
                         plotname=f"Edge Weights", cylinders=cylinderpos,
                         cylinder_scalars=cylindervals,
@@ -922,6 +907,9 @@ class MyNet(pl.LightningModule):
                         vmin=0, vmax=1, shading=False)
 
             images = [os.path.join(save_path, f"weights_mesh_{self.current_epoch:05}.png")]
+            if os.path.exists(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}.png")):
+                images.append(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}.png"))
+
             self.logger.log_image(key='pred weight', images=images, step=self.current_epoch)
 
             edgecorrespondences = source.edgecorrespondences
@@ -958,7 +946,9 @@ class MyNet(pl.LightningModule):
                     elif key == "edgecutloss":
                         from collections import defaultdict
 
-                        valid_edges_to_soup = source.valid_edges_to_soup
+                        valid_edges_to_soup = [source.valid_edges_to_soup[i] for i in subidxs]
+                        subvalid_edges_to_soup = [source.valid_edges_to_soup[i] for i in range(len(source.valid_edges_to_soup)) if i not in subidxs]
+
                         edgecutloss = val # edgeidxs x 1
 
                         ### Roadmap
@@ -969,6 +959,8 @@ class MyNet(pl.LightningModule):
                             edgevals = soupedgedict[soupkey]
                             if len(edgevals) >= 2:
                                 raise ValueError("More than 2 valid edges associated with souppair!")
+
+                            # NOTE: Only need this check because sometimes we test what happens when we remove edges from loss
                             edgevals.append(edgecutloss[i])
 
                         # Plot edges if given
@@ -985,11 +977,22 @@ class MyNet(pl.LightningModule):
                         cylinderpos = np.stack(cylinderpos, axis=0)
                         cylindervals = np.array(cylindervals)
 
+                        ## Also plot edges which are excluded by subidxs
+                        subcylinders = []
+                        for i in range(len(subvalid_edges_to_soup)):
+                            soupkey = frozenset((frozenset(subvalid_edges_to_soup[i][0]), frozenset(subvalid_edges_to_soup[i][1])))
+                            p0 = list(list(soupkey)[0])
+                            subcylinders.append(ogvsoup[p0])
+
+                        if len(subcylinders) == 0:
+                            subcylinders = None
+
                         export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
                                     plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
                                     cylinder_scalars=cylindervals, outline_width=0.01,
                                     device="cpu", n_sample=30, width=200, height=200,
-                                    vmin=0, vmax=0.1, shading=False)
+                                    vmin=0, vmax=0.1, shading=False,
+                                    subcylinders = subcylinders)
 
                     elif key == "edgegradloss": # E x 2
                         cylindervals = []
@@ -1082,6 +1085,8 @@ class MyNet(pl.LightningModule):
         else:
             pred_V, pred_J, pred_J_poiss, pred_J_restricted_poiss = self.predict_map(source, target, initj=initj if initj is not None else None)
 
+        # TODO: individual J/weight optimization -- check what happens if we start with ideal Jacobs and optimize just the weights
+
         # Drop last dimension of restricted J
         if pred_J_restricted_poiss.shape[2] == 3:
             pred_J_restricted_poiss = pred_J_restricted_poiss[:,:,:2]
@@ -1101,11 +1106,31 @@ class MyNet(pl.LightningModule):
         if self.args.lossgt:
             gtJ = source.gtJ.squeeze().to(self.device)
 
+
+        ## ==== DEBUGGING: manually set some edges to ignore in the stitching loss ====
+        ignore_edges = [298, 464, 555, 301, 304, 605, 456, 46,717,552,700,699,692, 691,
+                647, 190, 16, 200, 761, 757, 342, 662, 577, 122, 510, 79, 20, 193]
+
+        # Update edgeidxs according to which edges to ignore
+        edgeidxs = []
+        elens = []
+
+        # NOTE: Only use ignore edges if mesh is cone
+        ignoreset = ignore_edges[:self.args.ignorei]
+        keepidxs = []
+        for i in range(len(source.edges)):
+            if source.edges[i] not in ignoreset:
+                edgeidxs.append(source.edgeidxs[i])
+                elens.append(source.elens[i])
+                keepidxs.append(i)
+
+        elens = torch.tensor(elens, device=self.device)
+
         # NOTE predict_map already composites pred_J against initj
         pred_V = pred_V[:, :, :2].squeeze().reshape(-1, 3, 2)
         loss = self.lossfcn.computeloss(vertices, faces, ZeroNanGrad.apply(pred_V), ZeroNanGrad.apply(pred_J_poiss[:,:2,:]),
                                         gtjacobians=gtJ, weights=weights, stitchweights=self.stitchweights[batch_idx],
-                                        edgeidxs=source.edgeidxs, elens=source.elens.to(self.device))
+                                        edgeidxs=edgeidxs, elens=elens)
         lossrecord = self.lossfcn.exportloss()
         self.lossfcn.clear() # This resets the loss record dictionary
 
@@ -1141,7 +1166,8 @@ class MyNet(pl.LightningModule):
             'source_ind': source.source_ind,
             'target_inds': target.target_inds,
             "lossdict": lossrecord,
-            "loss": loss
+            "loss": loss,
+            "keepidxs": keepidxs,
         }
 
         if self.args.softpoisson:
@@ -1454,6 +1480,8 @@ class MyNet(pl.LightningModule):
             optimizer = torch.optim.Adam(list(self.parameters()), lr=self.lr)
         if self.args.optimizer == "sgd":
             optimizer = torch.optim.SGD(list(self.parameters()), lr=self.lr)
+
+        # TODO: Consider having separate LR between face latents vs jacobians
         # scheduler1 = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[self.args.lr_epoch_step[0],self.args.lr_epoch_step[1]], gamma=0.1)
         # scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=200, factor=0.8, threshold=0.0001,
         #                                                         min_lr=1e-7, verbose=True)

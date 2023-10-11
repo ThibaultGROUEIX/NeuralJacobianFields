@@ -7,8 +7,9 @@ import os
 import fresnel
 
 def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=2,
-            facecolors = None, edges = None, edgecolors = None, source = None,
+            facecolors = None, edges = None, edgecolors = None, source = None, valid_edges_to_soup = None,
             cmap = plt.get_cmap("tab20"), edge_cmap=plt.get_cmap("gist_rainbow"), edgecorrespondences=None,
+            subidxs=None,
             ):
     """ edges: E x 2 x 2 array of individiual node positions
         edgecolors: [0-1] values to query edge_cmap """
@@ -114,12 +115,18 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                 elif key == "edgecutloss":
                     from collections import defaultdict
 
-                    if source is None:
+                    if source is None or valid_edges_to_soup is None:
                         print(f"Need to pass in source mesh to plot {key}")
                         continue
 
-                    valid_edges_to_soup = source.valid_edges_to_soup
                     edgecutloss = val # edgeidxs x 1
+
+                    if valid_edges_to_soup is None:
+                        valid_edges_to_soup = source.valid_edges_to_soup
+
+                    if subidxs is not None:
+                        valid_edges_to_soup = [valid_edges_to_soup[i] for i in subidxs]
+                        assert len(valid_edges_to_soup) == len(edgecutloss)
 
                     fig, axs = plt.subplots(figsize=(5,5))
                     fig.suptitle(f"Avg Edge Cut Loss: {np.mean(edgecutloss):0.8f}")
@@ -221,7 +228,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     plt.close()
 
 def export_views(vertices, faces, savedir, n=5, n_sample=20, width=150, height=150, plotname="Views", filename="test", fcolor_vals=None,
-                 vcolor_vals=None, shading=True, cylinders=None, cylinder_scalars=None,
+                 vcolor_vals=None, shading=True, cylinders=None, cylinder_scalars=None, subcylinders=None,
                  device="cpu", outline_width=0.005, cmap= plt.get_cmap("Reds"), vmin=0, vmax=1):
     import torch
     import matplotlib as mpl
@@ -247,6 +254,14 @@ def export_views(vertices, faces, savedir, n=5, n_sample=20, width=150, height=1
             cylinder_colors = scalarmap.to_rgba(cylinder_scalars)[:,:,:3] # N x 2 x 3
             geometry.color[:] = cylinder_colors
             geometry.material.primitive_color_mix = 1.0
+
+    if subcylinders is not None:
+        geometry = fresnel.geometry.Cylinder(scene, N=len(subcylinders))
+        geometry.material = fresnel.material.Material(color=fresnel.color.linear([0,0,1]),
+                                                    roughness=1)
+        geometry.points[:] = subcylinders
+        geometry.radius[:] = np.ones(len(subcylinders)) * outline_width * 2
+        geometry.material.solid = 1.0
 
     # Create mesh
     fverts = vertices[faces].reshape(3 * len(faces), 3)

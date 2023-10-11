@@ -21,7 +21,7 @@ class SourceMesh:
 
     def __init__(self, args, source_ind, source_dir, extra_source_fields,
                  random_scale, ttype, use_wks=False, random_centering=False,
-                cpuonly=False, init=False, fft=False, fft_dim=256, flatten=False,
+                cpuonly=False, init=False, fft=None, fftscale=None, flatten=False,
                 initjinput=False, debug=False, top_k_eig=50):
         self.args = args
         self.__use_wks = use_wks
@@ -55,7 +55,7 @@ class SourceMesh:
                 n_input = 6
 
             # Initialize fourier features transform
-            self.fft = FourierFeatureTransform(n_input, fft_dim)
+            self.fft = FourierFeatureTransform(n_input, fft, fftscale)
 
         self.initweights = None
 
@@ -187,6 +187,10 @@ class SourceMesh:
 
         self.valid_edge_pairs, self.valid_edges_to_soup, self.edgeidxs, self.edgededupidxs, self.edges, self.elens, self.facepairs = get_edge_pairs(mesh, valid_pairs, device=device)
 
+
+        # TODO: Check the differences in the input features of the face pairs
+        facefeature_pairs = self.centroids_and_normals[self.facepairs]
+
         ### NOTE: BASE WEIGHTS INITIALIZED HERE
         if self.args.softpoisson == "edges":
             if self.args.spweight == "sigmoid":
@@ -233,7 +237,7 @@ class SourceMesh:
                 self.tuttetranslate = torch.load(os.path.join(self.source_dir, "tuttetranslate.pt"))
                 self.initweights = torch.load(os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt"))
             else:
-                from utils import tutte_embedding, get_local_tris, generate_random_cuts, generate_boundary_cut
+                from utils import tutte_embedding, get_local_tris, generate_random_cuts, generate_boundary_cut, make_cut
 
                 vertices = self.source_vertices
                 device = vertices.device
@@ -248,10 +252,29 @@ class SourceMesh:
                     rng = default_rng()
                     n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
 
-                    if self.args.simplecut and n_cuts > 0:
-                        cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
+                    ## ==== DEBUGGING: manually set some edges to cut in the initialization ====
+                    ignore_edges = [298, 464, 555, 301, 304, 605, 456, 46,717,552,700,699,692, 691,
+                            647, 190, 16, 200, 761, 757, 342, 662, 577, 122, 510, 79, 20]
+                    ignoreset = ignore_edges[:self.args.ignorei]
+                    if len(ignoreset) > 0:
+                        cutvs = []
+                        for i in range(len(ignoreset)):
+                            e = ignoreset[i]
+                            twovs = [v.index for v in mesh.topology.edges[e].two_vertices()]
+                            if i == 0:
+                                if not mesh.topology.vertices[twovs[0]].onBoundary():
+                                    assert mesh.topology.vertices[twovs[1]].onBoundary()
+                                    twovs = twovs[::-1]
+                            cutvs.extend(twovs)
+                        _, idx = np.unique(cutvs, return_index = True)
+                        cutvs = np.array(cutvs)[np.sort(idx).astype(int)]
+                        make_cut(mesh, cutvs)
+                        set_new_tutte = True
                     else:
-                        cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
+                        if self.args.simplecut and n_cuts > 0:
+                            cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
+                        else:
+                            cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
 
                     # Unit test: mesh is still connected
                     vs, fs, es = mesh.export_soup()
