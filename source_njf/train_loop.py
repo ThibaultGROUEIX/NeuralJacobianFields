@@ -1664,7 +1664,6 @@ def main(gen, args):
                          num_nodes=1,
                          gradient_clip_val=args.gradclip,
                          deterministic= args.deterministic,
-                         strategy='ddp' if torch.cuda.is_available() else 'auto',
                          callbacks=[checkpoint_callback,lr_monitor])
     ################################ TRAINER #############################
     # Cache directory

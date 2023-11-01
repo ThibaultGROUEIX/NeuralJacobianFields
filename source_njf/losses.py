@@ -225,17 +225,17 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
         return None
 
     # Threshold param tris as well
-    e1_p = torch.maximum(torch.minimum(e1_p, torch.tensor(1e5)), torch.tensor(1e-5))
-    e2_p = torch.maximum(torch.minimum(e2_p, torch.tensor(1e5)), torch.tensor(1e-5))
-    e3_p = torch.maximum(torch.minimum(e3_p, torch.tensor(1e5)), torch.tensor(1e-5))
+    e1_p = torch.maximum(torch.minimum(e1_p, torch.tensor(1e5)), torch.tensor(-1e5))
+    e2_p = torch.maximum(torch.minimum(e2_p, torch.tensor(1e5)), torch.tensor(-1e5))
+    e3_p = torch.maximum(torch.minimum(e3_p, torch.tensor(1e5)), torch.tensor(-1e5))
 
     # Compute all edge rotations
-    cot_full = torch.stack([cot1, cot2, cot3]).reshape(3, len(cot1), 1, 1)
+    cot_full = torch.abs(torch.stack([cot1, cot2, cot3]).reshape(3, len(cot1), 1, 1))
     e_full = torch.stack([e1, e2, e3])
     e_p_full = torch.stack([e1_p, e2_p, e3_p])
 
     # Compute covariance matrix
-    crosscov = torch.sum(cot_full * torch.matmul(e_p_full.unsqueeze(3), e_full.unsqueeze(2)), dim=0)
+    crosscov = torch.sum(cot_full * torch.matmul(e_full.unsqueeze(3), e_p_full.unsqueeze(2)), dim=0)
     crosscov = crosscov.reshape(crosscov.shape[0], 4) # F x 4
 
     E = (crosscov[:,0] + crosscov[:,3])/2
@@ -313,24 +313,23 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
     # NOTE: We normalize by mean edge length b/w p and e b/c for shrinking ARAP is bounded by edge length
     # Normalizing by avg edge length b/w p and e => ARAP bounded by 2 on BOTH SIDES
     mean_elen = (torch.linalg.norm(e_full, dim=2) + torch.linalg.norm(e_p_full, dim=2))/2
-    arap_tris = torch.sum(torch.abs(cot_full) * 1/mean_elen * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0) # F x 1
+    arap_tris = torch.sum(cot_full * 1/mean_elen * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0) # F x 1
     if timeit == True:
         print(f"ARAP calculation: {time.time()-t0:0.5f}")
 
     # Debugging: show rotated edges along with parameterization
     # import polyscope as ps
     # ps.init()
-    # f1 = faces[0]
-    # param_f1 = param[f1]
+    # param_f1 = param[0]
     # # Normalize the param so first vertex is at 0,0
     # param_f1 = param_f1 - param_f1[0]
     # og_f1 = local_tris[0] # 3 x 2
     # rot_f1 = R[0]
     # new_f1 = torch.matmul(rot_f1, og_f1.transpose(1,0)).transpose(1,0)
     # print(new_f1)
-    # og_curve = ps.register_curve_network("og triangle", og_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,1,0])
-    # param_curve = ps.register_curve_network("UV", param_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,0,1])
-    # rot_curve = ps.register_curve_network("rot triangle", new_f1.numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[1,0,0])
+    # og_curve = ps.register_curve_network("og triangle", og_f1.detach().cpu().numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,1,0])
+    # param_curve = ps.register_curve_network("UV", param_f1.detach().cpu().numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[0,0,1])
+    # rot_curve = ps.register_curve_network("rot triangle", new_f1.detach().cpu().numpy(), np.array([[0,1], [1,2], [2,0]]), enabled=True, color=[1,0,0])
     # ps.show()
 
     # # Compute energies
