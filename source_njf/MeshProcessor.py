@@ -22,7 +22,7 @@ WKS_DIM = 100
 
 class MeshProcessor:
     '''
-    Extracts all preprocessing-related data (sample points  for pointnet; wave-kernel-signature, etc.)
+    Extracts all preprocessing-related data (sample points  for pointnet wave-kernel-signature, etc.)
     '''
     def __init__(self, vertices, faces, ttype, source_dir=None,from_file = False,
                  cpuonly=False, load_wks_samples=False, load_wks_centroids=False,
@@ -32,7 +32,7 @@ class MeshProcessor:
         :param vertices:
         :param faces:
         :param ttype: the torch data type to use (float, half, double)
-        :param source_dir: the directory to load the preprocessed data from; if given, will try to load the data before computing, if not given, always compute
+        :param source_dir: the directory to load the preprocessed data from if given, will try to load the data before computing, if not given, always compute
         '''
 
         self.ttype = ttype
@@ -165,7 +165,7 @@ class MeshProcessor:
     def compute_centroids(self):
         m = trimesh.Trimesh(vertices=self.vertices, faces=self.faces, process=False)
         self.centroids.points_and_normals = np.hstack((np.mean(m.triangles, axis=1), m.face_normals))
-        self.get_samples()# this is to compute WKS for centroids
+        self.get_samples() # this is to compute WKS for centroids
 
     def get_differential_operators(self, save=True):
         if self.diff_ops.grad is None:
@@ -381,10 +381,6 @@ def _insert_triangle(old_tri, new_index):
     a, b, c = (old_tri[0], old_tri[1], old_tri[2])
     new_tris = numpy.array([[a, b, d], [b, c, d], [c, a, d]])
     return new_tris
-
-
-
-
 
 class WaveKernelSignatureError(Exception):
     pass

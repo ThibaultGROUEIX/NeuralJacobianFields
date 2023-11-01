@@ -192,6 +192,11 @@ class DeformationDataset(Dataset):
                     new_init = True
                 else:
                     new_init = self.args.basistype
+            # TODO: NEED TO ADD CONDITION FOR WHETHER THE INDS BEEN INITIALIZED ALREADY
+            elif self.args.ninit > 1:
+                new_init = "constant"
+            elif self.args.ninit == 1:
+                new_init = True
             source.load(new_init= new_init)
             self.source = source
 

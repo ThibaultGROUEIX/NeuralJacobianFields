@@ -36,6 +36,7 @@ def get_arg_parser():
 						type = str, default='outputs')
 
 	### ARCH
+	parser.add_argument('--arch', type=str, choices={'diffusionnet', 'meshcnn', 'mlp'}, help="architecture to use", default='mlp')
 	parser.add_argument('--softpoisson', type=str, choices={'edges', 'valid'}, help="SOFT POISSON", default=None)
 	parser.add_argument('--sparsepoisson', action="store_true")
 	parser.add_argument("--spweight", choices={'sigmoid', 'seamless', 'cosine'}, type=str,
@@ -45,6 +46,9 @@ def get_arg_parser():
 	parser.add_argument("--fftscale", type=int,
 							help='fft scale',
 							default=10)
+	parser.add_argument("--vertexdim", type=int,
+								help='vertex latent dimension',
+								default=32)
 	parser.add_argument("--facedim", type=int,
 								help='face latent dimension',
 								default=3)
@@ -65,12 +69,12 @@ def get_arg_parser():
 	parser.add_argument("--slimiters", type=int, default=500, help="number of iterations to optimize SLIM")
 	parser.add_argument("--init", choices={"tutte", "isometric", "slim"}, help="initialize 2D embedding", default=None, type=str)
 	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization. -1 indicates new initialization for EACH load")
-	parser.add_argument("--basistype", choices={"basis", "rot", "global"}, help="how to sample new triangle local basis", default="basis", type=str)
+	parser.add_argument("--basistype", choices={"basis", "rot", "global"}, help="how to sample new triangle local basis", default=None, type=str)
 	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
 							action="store_true")
 	parser.add_argument("--initweightinput", help="use the initialization weights as part of input",
 							action="store_true")
-	parser.add_argument("--noiseiso", help="noise the isometric embedding",
+	parser.add_argument("--optweight", help="optimize the weights instead of getting them from network",
 							action="store_true")
 
 	parser.add_argument("--simplecut", help="enforce single boundary cut", action="store_true")
@@ -117,8 +121,8 @@ def get_arg_parser():
  	###### POSTPROCESS ######
 	parser.add_argument("--hardpoisson", type=str, choices={'loss', 'weight'}, help = "cutting options for hard poisson",
 						default=None)
-	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-1, type=float)
-	parser.add_argument("--weightcuteps", help="epsilon for edge stitching post-process (for pred weights)", default=1e-3, type=float)
+	parser.add_argument("--cuteps", help="epsilon for edge stitching post-process", default=1e-2, type=float)
+	parser.add_argument("--weightcuteps", help="epsilon for edge stitching post-process (for pred weights)", default=1e-2, type=float)
 
 
 	parser.add_argument("--opttrans", help = "predict l0 translation and visualize", action="store_true")
@@ -134,12 +138,15 @@ def get_arg_parser():
 						help = "iterative reweighting of the stitching loss", default=None)
 	parser.add_argument("--ignorei", help = "cone cutting experiment", default=0,
 						type = int)
+	parser.add_argument("--gtuvloss", help="use ground truth uv supervision", action="store_true")
+	parser.add_argument("--gtjloss", help="ground truth jacobian loss", action="store_true")
+	parser.add_argument("--removecutfromloss", action="store_true")
 
 	# Seamless
 	parser.add_argument("--seamlessvertexsep", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--seamlessedgecut", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--seamlessgradloss", help = "use counting loss over distortion energy", action="store_true")
-	parser.add_argument("--seamlessdelta", help="initial delta for edge separation loss", default=0.5, type=float)
+	parser.add_argument("--seamlessdelta", help="initial delta for edge separation loss", default=0.0005, type=float)
 
 	# Weights
 	parser.add_argument("--edgegrad_weight", help="loss weight", default=1, type=float)
@@ -152,6 +159,9 @@ def get_arg_parser():
 	parser.add_argument("--sparse_schedule", choices={'linear', 'cosine'}, default=None, type=str)
 	parser.add_argument("--sparse_cosine_steps", default=None, type=int)
 
+	# Inverse jacobian loss
+	parser.add_argument("--invjloss", help="penalize jacobians which shrink", action="store_true")
+
 	# Sparse cuts loss
 	parser.add_argument("--sparsecutsloss", help = "use sparse cuts loss", action="store_true")
 
@@ -161,7 +171,6 @@ def get_arg_parser():
 
 	## ELSE
 	parser.add_argument("--lossgradientstitching", choices={'cosine', 'split', 'l2', 'l1'}, help = "use gradient stitching loss", default=None)
-	parser.add_argument("--lossgt", help = "use counting loss over distortion energy", action="store_true")
 
 	parser.add_argument("--stitchlossweight", help="weight for edge stitching losses", default=1, type=float)
 	parser.add_argument("--stitchlossweight_min", help="max weight for edge stitching losses", default=0, type=float)

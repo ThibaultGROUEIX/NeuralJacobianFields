@@ -116,6 +116,10 @@ def get_local_tris(vertices, faces, basis=None, device=torch.device("cpu")):
         y[torch.arange(len(angle)), basise] = t * torch.sin(angle)
 
     local_tris = torch.stack((x, y), dim=-1).reshape(len(angle), 3, 2)
+
+    # TODO: Assert that edge lengths have not changed
+
+
     return local_tris
 
 # Return updated stitched soupvs, soupfs based on original topology (vs, fs) and epsilon
@@ -1133,26 +1137,33 @@ def get_jacobian(vs, fs, uvmap):
     J = (newG @ uvmap).reshape(-1, 3, 2).transpose(0,2,1) # F x 2 x 3
     return J
 
+### Get (sorted) mapping from edge indexes of mesh to vertex indices
+def meshe_to_vpair(mesh):
+    # TODO: Need edgecorrespondences to also map to corresponding edge index in Mesh() data structure
+    from collections import defaultdict
+    meshetovpair = defaultdict(tuple) # edge idx (mesh indexing) => (v1, v2)
+    for eidx, edge in sorted(mesh.topology.edges.items()):
+        v1, v2 = edge.two_vertices()
+        meshetovpair[eidx] = frozenset([v1.index, v2.index])
+
+    return meshetovpair
+
 ### Get edge correspondences of soup
 # Assumes we are indexing some node array V by taking V[fs] and then flattening
 def edge_soup_correspondences(fs):
-    # TODO: Need edgecorrespondences to also map to corresponding edge index in Mesh() data structure
     from collections import defaultdict
-    edgecorrespondences = defaultdict(list) # {v1, v2} (original topology) => [(v1a, v2a), (v1b, v2b)] (soup vertices indexing F*3 x 3)
-    facecorrespondences = defaultdict(list) # {v1, v2} (original topology) => [f1, f2] (soup faces corresponding with edge corrs)
+    edgecorrespondences = defaultdict(list) # frozenset{v1, v2} (original topology) => [(v1a, v2a), (v1b, v2b)] (soup vertices indexing F*3 x 3)
+    facecorrespondences = defaultdict(list) # frozenset{v1, v2} (original topology) => [f1, f2] (soup faces corresponding with edge corrs)
     for fi in range(len(fs)):
         f = fs[fi]
         for i in range(3):
             v1, v2 = f[i], f[(i+1)%3]
+            edgekey = frozenset([v1, v2])
+            # NOTE: this assumes the faces are consistently oriented
             if v1 > v2:
-                edgekey = (v2, v1)
-
                 # Corresponding soup index
                 soupkey = (fi * 3 + (i+1)%3, fi * 3 + i)
-
             else:
-                edgekey = (v1, v2)
-
                 # Corresponding soup index
                 soupkey = (fi * 3 + i, fi * 3 + (i+1)%3)
 

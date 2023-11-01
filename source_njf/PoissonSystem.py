@@ -90,9 +90,10 @@ class SparseMat:
         return sp_csc((self.vals, (self.inds[0,:], self.inds[1,:])), shape = (self.n, self.m))
 
     def update_vals(self, new_vals, target_inds, lap_pinned=None, lap_pinned_rows=None, lap_pinned_cols=None):
+        """ target_inds: tuple (tensor, tensor) which indexes into soft laplacian corresponding to new_vals """
         # HACK: convert to dense then back to sparse
         densemat = torch.sparse_coo_tensor(self.inds, self.vals.detach(), (self.n, self.m)).to_dense()
-        assert len(target_inds) == len(new_vals), f"target_inds {len(target_inds)} and new_vals {len(new_vals)} must be the same length"
+        assert len(target_inds[0]) == len(new_vals), f"target_inds {len(target_inds[0])} and new_vals {len(new_vals)} must be the same length"
 
         # Add back in pinned values to laplacian
         if lap_pinned is not None:
@@ -103,9 +104,8 @@ class SparseMat:
                 densemat = torch.cat([densemat[:pidx, :], torch.from_numpy(lap_pinned_rows[i]).type_as(densemat).to(self.vals.device), densemat[pidx:,:]], dim=0)
                 densemat = torch.cat([densemat[:, :pidx], torch.from_numpy(lap_pinned_cols[i]).type_as(densemat).to(self.vals.device), densemat[:,pidx:]], dim=1)
 
-        weight_idxs = (torch.tensor([pair[0] for pair in target_inds]).to(new_vals.device), torch.tensor([pair[1] for pair in target_inds]).to(new_vals.device))
-        densemat[weight_idxs] = new_vals
-        densemat[weight_idxs[1], weight_idxs[0]] = new_vals
+        densemat[target_inds] = new_vals
+        # densemat[target_inds[1], target_inds[0]] = new_vals
 
         densemat.fill_diagonal_(0)
         densemat[range(len(densemat)), range(len(densemat))] = -torch.sum(densemat, dim=1)

@@ -65,13 +65,22 @@ class UVLoss:
         self.count = 0
 
     def computeloss(self, vertices = None, faces = None, uv = None, jacobians = None, initjacobs=None, seplossdelta=0.1,
-                    gtjacobians=None, weights = None, stitchweights = None, edgeidxs = None, elens=None):
+                    weights = None, stitchweights = None, source = None, keepidxs = None):
         loss = 0
         # Ground truth
-        if self.args.lossgt and gtjacobians is not None:
-            gtloss = torch.nn.functional.mse_loss(jacobians, gtjacobians, reduction='none')
-            loss += torch.mean(gtloss)
-            self.currentloss[self.count]['gtloss'] = torch.mean(gtloss, dim=[1,2]).detach().cpu().numpy()
+        if self.args.gtuvloss:
+            # TODO: DOUBLE CHECK THAT VERTEX ORDER WITHIN FACES IS CORRECT OTHERWISE THIS MISMATCHES
+            gtuvloss = torch.nn.functional.mse_loss(uv.reshape(-1, 2), source.get_loaded_data('gt_uvs'), reduction='none')
+            loss += torch.sum(gtuvloss)
+            self.currentloss[self.count]['gtuvloss'] = np.mean(gtuvloss.detach().cpu().numpy(), axis=1)
+
+        # Shrinking penalty
+        if self.args.invjloss:
+            # Penalize sqrt(2)/||J||^2 + epsilon
+            jnorm = torch.linalg.norm(jacobians, ord='fro', dim=(2,3))**2
+            invjloss = torch.sqrt(torch.tensor(2))/(jnorm.squeeze() + 1e-5)
+            loss += torch.mean(invjloss)
+            self.currentloss[self.count]['invjloss'] = invjloss.detach().cpu().numpy()
 
         # Autocuts
         # if self.args.lossautocut:
@@ -82,14 +91,15 @@ class UVLoss:
         ## Stitching loss: can be vertex separation, edge separation, or gradient stitching
         ## Options: {l1/l2 distance}, {seamless transformation}, {weighting}
         if self.args.stitchingloss is not None:
-            vertexsep, stitchingdict, weightdict = stitchingloss(vertices, faces, uv.reshape(-1, 2), self.args.stitchingloss, self.args,
-                                                      stitchweights=stitchweights, edgeidxs=edgeidxs, elens=elens)
+            edgesep, stitchingdict, weightdict = stitchingloss(vertices, faces, uv.reshape(-1, 2), self.args.stitchingloss, self.args,
+                                                      stitchweights=stitchweights, source = source,
+                                                      keepidxs = keepidxs)
             for k, v in stitchingdict.items():
                 self.currentloss[self.count][k] = v.detach().cpu().numpy()
-                loss += weightdict[k] * torch.mean(v)
+                loss += weightdict[k] * torch.sum(v)
 
-            # Vertex sep always goes into lossdict for visualization purposes
-            self.currentloss[self.count]['vertexseparation'] = vertexsep.detach()
+            # Edge sep always goes into lossdict for visualization purposes
+            self.currentloss[self.count]['edgeseparation'] = edgesep.detach().cpu().numpy()
 
         ### Distortion loss: can be ARAP or symmetric dirichlet
         distortionenergy = None
@@ -100,14 +110,14 @@ class UVLoss:
             self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
 
             if not self.args.losscount:
-                loss += self.args.distortion_weight * torch.mean(distortionenergy)
+                loss += self.args.distortion_weight * torch.sum(distortionenergy)
 
         if self.args.lossdistortion == "dirichlet":
-            distortionenergy = symmetricdirichlet(vertices, faces, jacobians, init_jacob=initjacobs)
+            distortionenergy = symmetricdirichlet(vertices, faces, jacobians.squeeze(), init_jacob=initjacobs)
             self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
 
             if not self.args.losscount:
-                loss += self.args.distortion_weight * torch.mean(distortionenergy)
+                loss += self.args.distortion_weight * torch.sum(distortionenergy)
 
         # Cut sparsity loss
         if self.args.sparsecutsloss:
@@ -155,6 +165,7 @@ def symmetricdirichlet(vs, fs, jacob=None, init_jacob=None):
             # Need final jacobian to be 2x2
             if jacob2.shape[2] > 2:
                 jacob2 = torch.matmul(jacob2, jacob2.transpose(1,2))
+        # NOTE: This assumes jacob matrix is size B x J1 x J2
         elif jacob.shape[2] > 2:
             # Map jacob to 2x2 by multiplying against transpose
             jacob2 = torch.matmul(jacob, jacob.transpose(1,2))
@@ -190,17 +201,22 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
     except Exception as e:
         print(e)
 
-    e1 = local_tris[:, 2, :] - local_tris[:, 0, :]
-    e2 = local_tris[:, 1, :] - local_tris[:, 0, :]
-    e3 = local_tris[:, 2, :] - local_tris[:, 1, :]
-    e1_p = paramtris[:, 2, :] - paramtris[:, 0, :]
-    e2_p = paramtris[:, 1, :] - paramtris[:, 0, :]
-    e3_p = paramtris[:, 2, :] - paramtris[:, 1, :]
+    e1 = local_tris[:, 1, :] - local_tris[:, 0, :]
+    e2 = local_tris[:, 2, :] - local_tris[:, 1, :]
+    e3 = local_tris[:, 0, :] - local_tris[:, 2, :]
+    e1_p = paramtris[:, 1, :] - paramtris[:, 0, :]
+    e2_p = paramtris[:, 2, :] - paramtris[:, 1, :]
+    e3_p = paramtris[:, 0, :] - paramtris[:, 2, :]
 
     # NOTE: sometimes denominator will be 0 i.e. area of triangle is 0 -> cotangent in this case is infty, default to 1e5
-    cot1 = torch.abs(torch.sum(e2 * e3, dim=1) / torch.clamp((e2[:, 0] * e3[:, 1] - e2[:, 1] * e3[:, 0]), min=1e-5))
-    cot2 = torch.abs(torch.sum(e1 * e3, dim=1) / torch.clamp((e1[:, 0] * e3[:, 1] - e1[:, 1] * e3[:, 0]), min=1e-5))
-    cot3 = torch.abs(torch.sum(e2 * e1, dim=1) / torch.clamp(e2[:, 0] * e1[:, 1] - e2[:, 1] * e1[:, 0], min=1e-5))
+    # Cotangent = cos/sin = dot(adjacent edges)/sqrt(1 - cos^2)
+    cos1 = torch.nn.functional.cosine_similarity(-e2, e3)
+    cos2 = torch.nn.functional.cosine_similarity(e1, -e3)
+    cos3 = torch.nn.functional.cosine_similarity(-e1, e2)
+
+    cot1 = cos1/torch.sqrt(1 - cos1**2)
+    cot2 = cos2/torch.sqrt(1 - cos2**2)
+    cot3 = cos3/torch.sqrt(1 - cos3**2)
 
     # Debug
     if torch.any(~torch.isfinite(paramtris)):
@@ -209,15 +225,17 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
         return None
 
     # Threshold param tris as well
-    e1_p = torch.maximum(torch.minimum(e1_p, torch.tensor(1e5)), torch.tensor(-1e5))
-    e2_p = torch.maximum(torch.minimum(e2_p, torch.tensor(1e5)), torch.tensor(-1e5))
-    e3_p = torch.maximum(torch.minimum(e3_p, torch.tensor(1e5)), torch.tensor(-1e5))
+    e1_p = torch.maximum(torch.minimum(e1_p, torch.tensor(1e5)), torch.tensor(1e-5))
+    e2_p = torch.maximum(torch.minimum(e2_p, torch.tensor(1e5)), torch.tensor(1e-5))
+    e3_p = torch.maximum(torch.minimum(e3_p, torch.tensor(1e5)), torch.tensor(1e-5))
 
     # Compute all edge rotations
     cot_full = torch.stack([cot1, cot2, cot3]).reshape(3, len(cot1), 1, 1)
     e_full = torch.stack([e1, e2, e3])
     e_p_full = torch.stack([e1_p, e2_p, e3_p])
-    crosscov = torch.sum(cot_full * torch.matmul(e_full.unsqueeze(3), e_p_full.unsqueeze(2)), dim=0)
+
+    # Compute covariance matrix
+    crosscov = torch.sum(cot_full * torch.matmul(e_p_full.unsqueeze(3), e_full.unsqueeze(2)), dim=0)
     crosscov = crosscov.reshape(crosscov.shape[0], 4) # F x 4
 
     E = (crosscov[:,0] + crosscov[:,3])/2
@@ -256,13 +274,14 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
     if len(baddet) > 0:
         print(f"ARAP warning: found {len(baddet)} flipped rotations.")
         V[baddet, :, 1] *= -1
-        R = torch.matmul(V, U).to(device)
+        R = torch.matmul(V, U).to(device) # F x 2 x 2
         assert torch.all(torch.det(R) >= 0)
 
     edge_tmp = torch.stack([e1, e2, e3], dim=2)
     rot_edges = torch.matmul(R, edge_tmp) # F x 2 x 3
     rot_e_full = rot_edges.permute(2, 0, 1) # 3 x F x 2
     cot_full = cot_full.reshape(cot_full.shape[0], cot_full.shape[1]) # 3 x F
+
     if renormalize == True:
         # ARAP-minimizing scaling of parameterization edge lengths
         if face_weights is not None:
@@ -285,7 +304,16 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
         return None
 
     # Compute face-level distortions
-    arap_tris = torch.sum(cot_full * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0)
+    # from meshing import Mesh
+    # from meshing.analysis import computeFaceAreas
+    # mesh = Mesh(vertices.detach().cpu().numpy(), faces.detach().cpu().numpy())
+    # computeFaceAreas(mesh)
+    # fareas = torch.from_numpy(mesh.fareas).to(vertices.device)
+
+    # NOTE: We normalize by mean edge length b/w p and e b/c for shrinking ARAP is bounded by edge length
+    # Normalizing by avg edge length b/w p and e => ARAP bounded by 2 on BOTH SIDES
+    mean_elen = (torch.linalg.norm(e_full, dim=2) + torch.linalg.norm(e_p_full, dim=2))/2
+    arap_tris = torch.sum(torch.abs(cot_full) * 1/mean_elen * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0) # F x 1
     if timeit == True:
         print(f"ARAP calculation: {time.time()-t0:0.5f}")
 
@@ -349,66 +377,60 @@ def edgedistortion(vs, fs, uv):
     return energy
 
 # ==================== Stitching Energies ===============================
-def stitchingloss(vs, fs, uv, losstypes, args, stitchweights=None, edgeidxs=None,
-                  elens=None):
+def stitchingloss(vs, fs, uv, losstypes, args, stitchweights=None, source = None, keepidxs = None):
     from source_njf.utils import vertex_soup_correspondences
     from itertools import combinations
 
-    vcorrespondences = vertex_soup_correspondences(fs.detach().cpu().numpy())
-    vpairs = []
-    for ogv, vlist in sorted(vcorrespondences.items()):
-        vpairs.extend(list(combinations(vlist, 2)))
-    vpairs = torch.tensor(vpairs, device=uv.device)
-    uvpairs = uv[vpairs] # V x 2 x 2
+    uvpairs = uv[source.edge_vpairs.to(uv.device)] # E x 2 x 2 x 2
+    elens = source.elens_nobound.to(uv.device)
 
-    ## Compute the vertex separation just b/c everything needs it
-    vertexsep = torch.sum(torch.nn.functional.mse_loss(uvpairs[:,0], uvpairs[:,1], reduction='none'), dim=1)
-    if args.stitchdist == "l1":
-        vertexsep = torch.sqrt(vertexsep)
+    if keepidxs is not None:
+        uvpairs = uvpairs[keepidxs]
+        elens = elens[keepidxs]
 
-    if args.seamlessvertexsep or args.seamlessedgecut:
-        seamlessvertexsep = (vertexsep * vertexsep)/(vertexsep * vertexsep + args.seamlessdelta)
 
-    if stitchweights is None:
-        stitchweights = torch.ones(len(vertexsep), device=uv.device)
+    ## Edge separation loss
+    if args.stitchdist == 'l2':
+        edgesep = torch.sqrt(torch.sum(torch.nn.functional.mse_loss(uvpairs[:,:,0,:], uvpairs[:,:,1,:], reduction='none'), dim=2))
+    elif args.stitchdist == 'l1':
+        edgesep = torch.sum(torch.nn.functional.l1_loss(uvpairs[:,:,0,:], uvpairs[:,:,1,:], reduction='none'), dim=2)
+    edgesep = torch.mean(edgesep, dim=1) # E x 1
+
+    # Weight with edge lengths
+    wedgesep = edgesep * elens
+
+    # if stitchweights is None:
+    #     stitchweights = torch.ones(len(vertexsep), device=uv.device)
 
     lossdict = {}
     weightdict = {}
+    # NOTE: We assume everything can just use edges going forward ... uncomment if not true
     for losstype in losstypes:
-        if losstype == "vertexseploss": # Pairs x 2
-            if args.seamlessvertexsep:
-                lossdict[losstype] = stitchweights * torch.sum(seamlessvertexsep, dim=1)
-            else:
-                lossdict[losstype] = stitchweights * torch.sum(vertexsep, dim=1)
-                weightdict[losstype] = args.vertexsep_weight
+        # if losstype == "vertexseploss": # Pairs x 2
+        #     if args.seamlessvertexsep:
+        #         lossdict[losstype] = stitchweights * torch.sum(seamlessvertexsep, dim=1)
+        #     else:
+        #         lossdict[losstype] = stitchweights * torch.sum(vertexsep, dim=1)
+        #         weightdict[losstype] = args.vertexsep_weight
 
-        elif losstype == "edgecutloss": # E*2 x 2 (two vertex pairs per edge!)
-            # NOTE: Each edge will be associated with two values (b/c there's 2 pairs of corresponding vertices per edge)
-            # For viz: we will average over the two pairs b/c most common thing is for 1 pair to cut and other to be stitched
-            if edgeidxs is None:
-                raise ValueError("Must provide edgeidxs for edgecut loss")
-
-            if elens is None:
-                elens = torch.ones(len(edgeidxs), device=uv.device)
-
+        if losstype == "edgecutloss": # E x 1
             if args.seamlessedgecut:
-                edgecutloss = stitchweights[edgeidxs] * seamlessvertexsep[edgeidxs] * elens/torch.sum(elens) * args.edgecut_weight
+                edgecutloss = wedgesep * wedgesep/(wedgesep * wedgesep + args.seamlessdelta)
             else:
-                edgecutloss = stitchweights[edgeidxs] * vertexsep[edgeidxs] * elens/torch.sum(elens) * args.edgecut_weight
-
+                edgecutloss = wedgesep
             lossdict[losstype] = edgecutloss
             weightdict[losstype] = args.edgecut_weight
 
-        elif losstype == "edgegradloss": # E x 2
-            gradloss = uvgradloss(vs, fs, uv, loss=args.stitchdist)
+        # elif losstype == "edgegradloss": # E x 2
+        #     gradloss = uvgradloss(vs, fs, uv, loss=args.stitchdist)
 
-            if args.seamlessgradloss:
-                gradloss = (gradloss * gradloss)/(gradloss * gradloss + args.seamlessdelta)
+        #     if args.seamlessgradloss:
+        #         gradloss = (gradloss * gradloss)/(gradloss * gradloss + args.seamlessdelta)
 
-            lossdict[losstype] = gradloss
-            weightdict[losstype] = args.edgegrad_weight
+        #     lossdict[losstype] = gradloss
+        #     weightdict[losstype] = args.edgegrad_weight
 
-    return vertexsep, lossdict, weightdict
+    return edgesep, lossdict, weightdict
 
 # Compute loss based on vertex-vertex distances
 def vertexseparation(vs, fs, uv, loss='l1'):

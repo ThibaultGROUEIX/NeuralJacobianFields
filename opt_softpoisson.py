@@ -153,6 +153,9 @@ diff -= torch.mean(diff, dim=1, keepdims=True) # Removes effect of per-triangle 
 torch.testing.assert_close(diff, torch.zeros_like(diff), atol=1e-5, rtol=1e-4)
 inituv = inituv.squeeze()
 
+# Save initj for sanity check against NJF
+# torch.save(initj, "opt_initj.pt")
+
 # Compute differential operators for triangle soup
 dim = 3
 is_sparse = False
@@ -197,7 +200,8 @@ for ogv, vlist in sorted(vcorrespondences.items()):
 
 # Need edge to soup pairs to visualize cuts
 from source_njf.utils import get_edge_pairs, edge_soup_correspondences
-valid_edge_pairs, valid_edges_to_soup, edgeidxs, edgededupidxs, edges, elens, facepairs = get_edge_pairs(mesh, valid_pairs, device=device)
+ogmesh = Mesh(ogvertices.detach().cpu().numpy(), ogfaces.detach().cpu().numpy())
+valid_edge_pairs, valid_edges_to_soup, edgeidxs, edgededupidxs, edges, elens, facepairs = get_edge_pairs(ogmesh, valid_pairs, device=device)
 
 keep_edgeidxs = []
 keepidxs = []
@@ -267,7 +271,7 @@ if args.continuetrain and os.path.exists(os.path.join(screendir, "weights.pt")) 
     print(f"\n============ Continuing optimization from epoch {starti} ===========\n")
 else:
     clear_directory(screendir)
-    weights = torch.ones(len(weight_idxs[0])).to(device).double() * -5
+    weights = torch.ones(len(weight_idxs[0])).to(device).double() * -100
     starti = 0
     lossdict = defaultdict(list)
     stitchweight = torch.ones(len(weights)).double().to(device)
@@ -288,12 +292,16 @@ else:
 
         for i in range(len(checkvalid)):
             if checkvalid[i] in new_valid_pairs:
-                    weights[i] = 1
+                    weights[i] = 100
     weights.requires_grad_()
     optim = torch.optim.Adam([weights, initj], lr=args.lr)
 
 framedir = os.path.join(screendir, "frames")
 Path(framedir).mkdir(parents=True, exist_ok=True)
+
+# Debugging: save weights and indices
+torch.save(weights, "./weights.pt")
+torch.save(weight_idxs, "./weight_idxs.pt")
 
 id = None
 if args.continuetrain:
@@ -551,7 +559,7 @@ for iteration in range(starti, args.niters):
 
             imagepaths = [os.path.join(framedir, f"uv_{iteration:06}.png")] + \
                         [os.path.join(framedir, f"{key}_uv_{iteration:06}.png") for key in lossdict_viz.keys() if "loss" in key]
-            images = [wandb.Image(Image.open(x) for x in imagepaths)]
+            images = [wandb.Image(Image.open(x)) for x in imagepaths]
             wandb.log({'uvs': images}, step=iteration, commit=True)
 
             # Mesh Energies

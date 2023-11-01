@@ -7,9 +7,10 @@ import os
 import fresnel
 
 def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=2,
+            dmin=0, dmax=0.1,
             facecolors = None, edges = None, edgecolors = None, source = None, valid_edges_to_soup = None,
             cmap = plt.get_cmap("tab20"), edge_cmap=plt.get_cmap("gist_rainbow"), edgecorrespondences=None,
-            subidxs=None,
+            keepidxs=None,
             ):
     """ edges: E x 2 x 2 array of individiual node positions
         edgecolors: [0-1] values to query edge_cmap """
@@ -51,7 +52,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                             linewidth=0.1, edgecolor="black")
 
         # Plot edges if given
-        if edges is not None:
+        if edges is not None and len(edges) > 0:
             for i, e in enumerate(edges):
                 axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
                          color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
@@ -79,7 +80,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     separationloss = val
 
                     fig, axs = plt.subplots(figsize=(5,5))
-                    fig.suptitle(f"Avg Vertex Loss: {np.mean(separationloss):0.8f}")
+                    fig.suptitle(f"Total Vertex Loss: {np.sum(separationloss):0.8f}")
                     cmap = plt.get_cmap("Reds")
 
                     # Convert separation loss to per vertex
@@ -102,44 +103,31 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     linewidth=0.5, vmin=0, vmax=0.2, edgecolor='black')
 
                     # Plot edges if given
-                    if edges is not None:
+                    if edges is not None and len(edges) > 0:
                         for i, e in enumerate(edges):
                             axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
                                         color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
 
                     plt.axis('off')
                     axs.axis("equal")
-                    plt.savefig(os.path.join(path, f"vertexseploss_{fname}.png"), bbox_inches='tight', dpi=600)
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight', dpi=600)
                     plt.close()
 
                 elif key == "edgecutloss":
                     from collections import defaultdict
 
-                    if source is None or valid_edges_to_soup is None:
+                    if source is None:
                         print(f"Need to pass in source mesh to plot {key}")
                         continue
 
-                    edgecutloss = val # edgeidxs x 1
-
-                    if valid_edges_to_soup is None:
-                        valid_edges_to_soup = source.valid_edges_to_soup
-
-                    if subidxs is not None:
-                        valid_edges_to_soup = [valid_edges_to_soup[i] for i in subidxs]
-                        assert len(valid_edges_to_soup) == len(edgecutloss)
+                    edgecutloss = val # E x 1
+                    edge_vpairs = source.edge_vpairs
+                    if keepidxs is not None:
+                        edge_vpairs = edge_vpairs[keepidxs]
+                    assert len(edgecutloss) == len(edge_vpairs), f"len(edgecutloss) {len(edgecutloss)} != len(edge_vpairs) {len(edge_vpairs)}"
 
                     fig, axs = plt.subplots(figsize=(5,5))
-                    fig.suptitle(f"Avg Edge Cut Loss: {np.mean(edgecutloss):0.8f}")
-
-                    ### Roadmap
-                    # For each og edge: get avg of the 2 corresponding edge cut vals + get the two soup edges
-                    soupedgedict = defaultdict(list)
-                    for i in range(len(valid_edges_to_soup)):
-                        soupkey = frozenset((frozenset(valid_edges_to_soup[i][0]), frozenset(valid_edges_to_soup[i][1])))
-                        edgevals = soupedgedict[soupkey]
-                        if len(edgevals) >= 2:
-                            raise ValueError("More than 2 valid edges associated with souppair!")
-                        edgevals.append(edgecutloss[i])
+                    fig.suptitle(f"Total Edge Cut Loss: {np.sum(edgecutloss):0.8f}")
 
                     cmap = plt.get_cmap("Reds")
                     norm = mpl.colors.Normalize(vmin=0, vmax=0.1)
@@ -151,12 +139,10 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                                     linewidth=0.5, edgecolor='black')
 
                     # Plot edges if given
-                    for soupkey, edgecutval in soupedgedict.items():
-                        p0 = list(list(soupkey)[0])
-                        p1 = list(list(soupkey)[1])
-                        edgeval = np.mean(edgecutval)
-                        uv0 = pred_vertices[p0]
-                        uv1 = pred_vertices[p1]
+                    for i in range(len(edgecutloss)):
+                        edgeval = edgecutloss[i]
+                        uv0 = pred_vertices[edge_vpairs[i][:,0]]
+                        uv1 = pred_vertices[edge_vpairs[i][:,1]]
 
                         axs.plot(uv0[:, 0], uv0[:, 1], marker='none', linestyle='-',
                                     color=scalarmap.to_rgba(edgeval)[:3], linewidth=1.5)
@@ -166,7 +152,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
 
                     plt.axis('off')
                     axs.axis("equal")
-                    plt.savefig(os.path.join(path, f"edgecutloss_{fname}.png"), bbox_inches='tight', dpi=600)
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight', dpi=600)
                     plt.close()
 
                 elif key == "edgegradloss": # E x 2
@@ -184,7 +170,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                         uve2.append(pred_vertices[list(v[1])])
 
                     fig, axs = plt.subplots(figsize=(5,5))
-                    fig.suptitle(f"Avg Edge Grad Loss: {np.mean(val):0.8f}")
+                    fig.suptitle(f"Total Edge Grad Loss: {np.sum(val):0.8f}")
                     cmap = plt.get_cmap("Reds")
                     norm = mpl.colors.Normalize(vmin=0, vmax=0.5)
                     scalarmap = cm.ScalarMappable(norm=norm, cmap=cmap)
@@ -205,11 +191,9 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
 
                     plt.axis('off')
                     axs.axis("equal")
-                    plt.savefig(os.path.join(path, f"edgegradloss_{fname}.png"), bbox_inches='tight', dpi=600)
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight', dpi=600)
                     plt.close()
-                elif key == "sparsecutsloss":
-                    continue
-                else:
+                elif key == "distortionloss":
                     fig, axs = plt.subplots(figsize=(5,5))
                     fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
@@ -217,7 +201,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                                 linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
 
                     # Plot edges if given
-                    if edges is not None:
+                    if edges is not None or len(edges) > 0:
                         for i, e in enumerate(edges):
                             axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
                                     color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
@@ -226,6 +210,62 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     axs.axis("equal")
                     plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)
                     plt.close()
+                elif key == "invjloss":
+                    fig, axs = plt.subplots(figsize=(5,5))
+                    fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
+                    cmap = plt.get_cmap("Reds")
+                    axs.tripcolor(tris, val[:len(triangles)], facecolors=val[:len(triangles)], cmap=cmap,
+                                linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
+
+                    # Plot edges if given
+                    if edges is not None or len(edges) > 0:
+                        for i, e in enumerate(edges):
+                            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                                    color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
+                    plt.axis('off')
+                    axs.axis("equal")
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)
+                    plt.close()
+                elif key == "fliploss":
+                    fig, axs = plt.subplots(figsize=(5,5))
+                    fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
+                    cmap = plt.get_cmap("Reds")
+                    axs.tripcolor(tris, val[:len(triangles)], facecolors=val[:len(triangles)], cmap=cmap,
+                                linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
+
+                    # Plot edges if given
+                    if edges is not None or len(edges) > 0:
+                        for i, e in enumerate(edges):
+                            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                                    color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
+                    plt.axis('off')
+                    axs.axis("equal")
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)
+                    plt.close()
+                elif key == "gtuvloss":
+                    fig, axs = plt.subplots(figsize=(5,5))
+                    fig.suptitle(f"Total GT Loss: {np.sum(val):0.8f}")
+                    cmap = plt.get_cmap("Reds")
+
+                    axs.tripcolor(tris, val, cmap=cmap,
+                                linewidth=0.1, vmin=0, vmax=1, edgecolor='black')
+
+                    # Plot edges if given
+                    if edges is not None and len(edges) > 0:
+                        for i, e in enumerate(edges):
+                            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                                        color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
+                    plt.axis('off')
+                    axs.axis("equal")
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight', dpi=600)
+                    plt.close()
+                else:
+                    print(f"No visualization code for {key}")
+                    continue
+
 
 def export_views(vertices, faces, savedir, n=5, n_sample=20, width=150, height=150, plotname="Views", filename="test", fcolor_vals=None,
                  vcolor_vals=None, shading=True, cylinders=None, cylinder_scalars=None, subcylinders=None,
