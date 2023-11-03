@@ -1201,61 +1201,6 @@ class MyNet(pl.LightningModule):
                 plt.close(fig)
                 plt.cla()
 
-        if validation:
-            # NOTE: We use isoj only to get the final UVs
-            if self.args.init == "isometric":
-                initj = source.isoj.squeeze().to(self.device)
-
-            # NOTE: Post-process topology if running edge gradient optimization
-            # Run poisson solve on updated topology
-            # if self.args.opttrans:
-            #     # Replace predV with L0 lstsq translations
-            #     from source_njf.utils import leastSquaresTranslation
-
-            #     vs = source.get_vertices().detach().cpu().numpy()
-            #     fs = faces.detach().cpu().numpy()
-
-            #     opttrans, cutedges, cutlength = leastSquaresTranslation(vs, fs, pred_V.detach().cpu().numpy(), return_cuts = True,
-            #                                        iterate=True, debug=False, patience=5, cut_epsilon=self.args.cuteps)
-            #     ret['pred_V_opttrans'] = (pred_V.detach() + torch.from_numpy(opttrans).to(self.device)).reshape(-1, 2)
-            #     ret['cutEdges'] = cutedges
-            #     ret['cutLength'] = cutlength
-
-            #     ## Create new topology based on least squares cuts
-                # meshprocessor = MeshProcessor.MeshProcessor.meshprocessor_from_array(postv, postf, source.source_dir, source._SourceMesh__ttype,
-                #                                                                      cpuonly=source.cpuonly, load_wks_samples=source._SourceMesh__use_wks,
-                #                                                                      load_wks_centroids=source._SourceMesh__use_wks)
-                # meshprocessor.prepare_temporary_differential_operators(source._SourceMesh__ttype)
-                # poissonsolver = meshprocessor.diff_ops.poisson_solver
-                # with torch.no_grad():
-                #     # Need full Jacobian for poisson solve
-                #     if len(pred_J.shape) == 3:
-                #         pred_J = pred_J.unsqueeze(0)
-                #     if len(initj.shape) == 3:
-                #         initj = initj.unsqueeze(0)
-                #     if initj is not None:
-                #         pred_J = torch.cat([torch.einsum("abcd,abde->abce", (pred_J[:,:,:2,:2], initj[:,:,:2,:])),
-                #                             torch.zeros(pred_J.shape[0], pred_J.shape[1], 1, pred_J.shape[3], device=self.device)],
-                #                         dim=2) # B x F x 3 x 3
-                #     if self.args.align_2D:  # if the target is in 2D the last column of J is 0
-                #         pred_J[:, :,2,:] = 0 # NOTE: predJ shape is B x F x 3 x 3 (where first 3-size is interpreted as axes)
-                #     # TODO: ASK NOAM ABOUT WHETHER YOU CAN DO THIS WITH TRIANGLE SOUP
-                #     stitchv = poissonsolver.solve_poisson(pred_J)
-                #     stitchJ = poissonsolver.jacobians_from_vertices(stitchv)
-            # else:
-
-            ret['pred_V'] = pred_V.detach().reshape(-1, 2)
-            ret['T'] = np.arange(len(faces)*3).reshape(len(faces), 3)
-
-            # NOTE: Poisson solve on original topology
-            # with torch.no_grad():
-            #     pred_V, poisson_J, poisson_J_restricted = self.predict_map(source, target, initj=initj if initj is not None else None)
-
-            # ret['poissonUV'] = pred_V
-            # # NOTE: Initj already FACTORED into the predict map!!
-            # poissondirichlet = symmetricdirichlet(vertices, faces, poisson_J[0, :,:2,:])
-            # ret['poissonDistortion'] = poissondirichlet.detach().cpu().numpy()
-
         # if self.args.test:
         #     ret['pred_J_R'] = poisson_J_restricted.detach()
         #     ret['target_J_R'] = GT_J_restricted.detach()
@@ -1709,8 +1654,12 @@ def main(gen, args):
     if args.no_validation or args.test:
         valid_loader = None
     else:
-        valid_dataset = DeformationDataset(valid_pairs, gen.get_keys_to_load(True),
-                                           gen.get_keys_to_load(False), use_dtype, train=False, args=args)
+        # NOTE: In the single cut neuralopt case -- we just copy over the training data
+        if args.ninit == 1:
+            valid_dataset = train_dataset
+        else:
+            valid_dataset = DeformationDataset(valid_pairs, gen.get_keys_to_load(True),
+                                            gen.get_keys_to_load(False), use_dtype, train=False, args=args)
         # if args.softpoisson:
         #     valid_dataset.get_weights_dim()
 
