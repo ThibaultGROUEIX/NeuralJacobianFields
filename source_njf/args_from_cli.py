@@ -78,8 +78,8 @@ def get_arg_parser():
 							action="store_true")
 
 	parser.add_argument("--simplecut", help="enforce single boundary cut", action="store_true")
-	parser.add_argument("--min_cuts", type=int, help="minimum # cuts for tutte init", default=5)
-	parser.add_argument("--max_cuts", type=int, help="maximum # cuts for tutte init", default=15)
+	parser.add_argument("--min_cuts", type=int, help="minimum # cuts for tutte init", default=0)
+	parser.add_argument("--max_cuts", type=int, help="maximum # cuts for tutte init", default=0)
 
 	parser.add_argument("--no_vertex_loss", help="use source/target vertex l2 loss",
 						action="store_true")
@@ -149,15 +149,19 @@ def get_arg_parser():
 	parser.add_argument("--seamlessdelta", help="initial delta for edge separation loss", default=0.0005, type=float)
 
 	# Weights
+	parser.add_argument("--stitchschedule", help = "apply linear schedule on stitching loss", type=str,
+                     choices={'linear', 'cosine'}, default=None)
 	parser.add_argument("--edgegrad_weight", help="loss weight", default=1, type=float)
 	parser.add_argument("--edgecut_weight", help="loss weight", default=1, type=float)
+	parser.add_argument("--edgecut_weight_max", help="max edge cut weight", default=1, type=float)
+	parser.add_argument("--edgecut_weight_min", help="min edge cut weight", default=0, type=float)
 	parser.add_argument("--vertexsep_weight", help="loss weight", default=1, type=float)
 	parser.add_argument("--distortion_weight", help = "distortion weight", default=1, type=float)
 	parser.add_argument("--sparsecuts_weight", help = "sparse cuts weight", default=1, type=float)
 	parser.add_argument("--sparselossweight_max", help = "sparse cuts weight", default=1, type=float)
 	parser.add_argument("--sparselossweight_min", help = "sparse cuts weight", default=1, type=float)
 	parser.add_argument("--sparse_schedule", choices={'linear', 'cosine'}, default=None, type=str)
-	parser.add_argument("--sparse_cosine_steps", default=None, type=int)
+	parser.add_argument("--sparse_cosine_steps", default=1000, type=int)
 
 	# Inverse jacobian loss
 	parser.add_argument("--invjloss", help="penalize jacobians which shrink", action="store_true")
@@ -167,7 +171,8 @@ def get_arg_parser():
 
 	## Distortion loss
 	parser.add_argument("--lossdistortion", help = "choice of distortion loss", default=None, type=str, choices={'arap', 'dirichlet', 'edge'})
-	parser.add_argument("--losscount", help = "use counting loss over distortion energy", action="store_true")
+	parser.add_argument("--losscount", help = "counting loss", action="store_true")
+	parser.add_argument("--arapnorm", help = "normalize arap using avg edge len", action="store_true")
 
 	## ELSE
 	parser.add_argument("--lossgradientstitching", choices={'cosine', 'split', 'l2', 'l1'}, help = "use gradient stitching loss", default=None)

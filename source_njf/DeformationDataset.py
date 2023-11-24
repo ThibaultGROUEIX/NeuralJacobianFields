@@ -60,7 +60,7 @@ class DeformationDataset(Dataset):
         # NOTE: duplicate source for however many initializations we need
         for s,ts in source_target.items():
             chunks = np.split(ts, np.arange(args.targets_per_batch,len(ts),args.targets_per_batch))
-            if args.init == "isometric" and args.ninit > 0:
+            if args.ninit > 0:
                 for _ in range(args.ninit):
                     for chunk in chunks:
                         self.source_and_target.append((s,chunk))
@@ -192,11 +192,6 @@ class DeformationDataset(Dataset):
                     new_init = True
                 else:
                     new_init = self.args.basistype
-            # TODO: NEED TO ADD CONDITION FOR WHETHER THE INDS BEEN INITIALIZED ALREADY
-            elif self.args.ninit > 1:
-                new_init = "constant"
-            elif self.args.ninit == 1:
-                new_init = True
             source.load(new_init= new_init)
             self.source = source
 

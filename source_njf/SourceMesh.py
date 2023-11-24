@@ -139,8 +139,7 @@ class SourceMesh:
             # TODO: SYNC THIS WITH NJF PREPROCESSING AND CACHE
             faces = self.get_source_triangles()
             self.frames, self.mass, self.L, self.evals, self.evecs, self.gradX, self.gradY = get_operators(self.source_vertices, torch.from_numpy(faces),
-                                                                        op_cache_dir=self.source_dir, k_eig=self.top_k_eig,
-                                                                        overwrite_cache=self.args.overwritecache)
+                                                                        op_cache_dir=self.source_dir, k_eig=self.top_k_eig)
             self.frames.to(device)
             self.mass.to(device)
             self.L.to(device)
@@ -303,12 +302,16 @@ class SourceMesh:
                 os.path.exists(os.path.join(self.source_dir, "tuttej.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "tuttetranslate.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt")) and \
-                    not new_init:
+                os.path.exists(os.path.join(self.source_dir, "cutvs.npy")) and \
+                os.path.exists(os.path.join(self.source_dir, "cutfs.npy")) and \
+                    not new_init and self.args.ignorei == 0:
                 self.tuttefuv = torch.load(os.path.join(self.source_dir, "tuttefuv.pt"))
                 self.tutteuv = torch.load(os.path.join(self.source_dir, "tutteuv.pt"))
                 self.tuttej = torch.load(os.path.join(self.source_dir, "tuttej.pt"))
                 self.tuttetranslate = torch.load(os.path.join(self.source_dir, "tuttetranslate.pt"))
                 self.initweights = torch.load(os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt"))
+                self.cutvs = np.load(os.path.join(self.source_dir, "cutvs.npy"))
+                self.cutfs = np.load(os.path.join(self.source_dir, "cutfs.npy"))
 
                 # Get delete idxs and remove from keepidxs
                 if self.args.removecutfromloss:
@@ -318,44 +321,44 @@ class SourceMesh:
                 from utils import tutte_embedding, get_local_tris, generate_random_cuts, generate_boundary_cut, make_cut
 
                 ogsoup = ogvs[ogfs]
+                cutvs = None
+                rng = default_rng()
+                n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
 
-                if new_init:
-                    rng = default_rng()
-                    n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
-
-                    ## ==== DEBUGGING: manually set some edges to cut in the initialization ====
-                    ignore_edges = [298, 464, 555, 301, 304, 605, 456, 46,717,552,700,699,692, 691,
-                            647, 190, 16, 200, 761, 757, 342, 662, 577, 122, 510, 79, 20]
-                    ignoreset = ignore_edges[:self.args.ignorei]
-                    if len(ignoreset) > 0:
-                        cutvs = []
-                        for i in range(len(ignoreset)):
-                            e = ignoreset[i]
-                            twovs = [v.index for v in mesh.topology.edges[e].two_vertices()]
-                            if i == 0:
-                                if not mesh.topology.vertices[twovs[0]].onBoundary():
-                                    assert mesh.topology.vertices[twovs[1]].onBoundary()
-                                    twovs = twovs[::-1]
-                                cutvs.extend(twovs)
-                            else:
-                                # One of the vertices should be same as the previous
-                                if twovs[0] == cutvs[-1]:
-                                    cutvs.append(twovs[1])
-                                elif twovs[1] == cutvs[-1]:
-                                    cutvs.append(twovs[0])
-                                else:
-                                    raise ValueError(f"Vertex pair {twovs} does not share a vertex with the previous edge in cut set {cutvs}!")
-
-                        cutvs = np.array(cutvs)
-                        make_cut(mesh, cutvs)
-                        set_new_tutte = True
-                    else:
-                        if self.args.simplecut and n_cuts > 0:
-                            cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
+                ## ==== DEBUGGING: manually set some edges to cut in the initialization ====
+                ignore_edges = [298, 464, 555, 301, 304, 605, 456, 46,717,552,700,699,692, 691,
+                        647, 190, 16, 200, 761, 757, 342, 662, 577, 122, 510, 79, 20]
+                ignoreset = ignore_edges[:self.args.ignorei]
+                if len(ignoreset) > 0:
+                    cutvs = []
+                    for i in range(len(ignoreset)):
+                        e = ignoreset[i]
+                        twovs = [v.index for v in mesh.topology.edges[e].two_vertices()]
+                        if i == 0:
+                            if not mesh.topology.vertices[twovs[0]].onBoundary():
+                                assert mesh.topology.vertices[twovs[1]].onBoundary()
+                                twovs = twovs[::-1]
+                            cutvs.extend(twovs)
                         else:
-                            # TODO: UPDATE THIS TO CUT VERTICES NOT POSITIONS
-                            cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
+                            # One of the vertices should be same as the previous
+                            if twovs[0] == cutvs[-1]:
+                                cutvs.append(twovs[1])
+                            elif twovs[1] == cutvs[-1]:
+                                cutvs.append(twovs[0])
+                            else:
+                                raise ValueError(f"Vertex pair {twovs} does not share a vertex with the previous edge in cut set {cutvs}!")
 
+                    cutvs = np.array(cutvs)
+                    make_cut(mesh, cutvs)
+                    set_new_tutte = True
+                else:
+                    if self.args.simplecut and n_cuts > 0:
+                        cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
+                    elif n_cuts > 0:
+                        # TODO: UPDATE THIS TO CUT VERTICES NOT POSITIONS
+                        cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
+
+                if cutvs is not None:
                     # Unit test: mesh is still connected
                     vs, fs, es = mesh.export_soup()
                     testsoup = PolygonSoup(vs, fs)
@@ -427,7 +430,6 @@ class SourceMesh:
                             # assert checke == cutvpair, f"Cut vertex pair {cutvpair} does not match edge vpair {checke}!"
                             # assert eidx in ignoreset, f"Cut edge {eidx} not in ignoreset {ignoreset}!"
 
-                            # TODO: We are setting the wrong vpairs to 0 for some reason!!
                             if self.args.spweight == "sigmoid":
                                 self.initweights[eidx_nobound] = -10
                             elif self.args.spweight in ["seamless", "cosine"]:
@@ -472,12 +474,15 @@ class SourceMesh:
                 self.tuttetranslate = (checktutte - pred_V)[:,:,:2]
 
                 # Cache everything (only if not continuous new init)
-                if new_init == "constant" or not new_init:
+                if not new_init and self.args.ignorei == 0:
                     torch.save(self.tuttefuv, os.path.join(self.source_dir, "tuttefuv.pt"))
                     torch.save(self.tutteuv, os.path.join(self.source_dir, "tutteuv.pt"))
                     torch.save(self.tuttej, os.path.join(self.source_dir, "tuttej.pt"))
                     torch.save(self.tuttetranslate, os.path.join(self.source_dir, "tuttetranslate.pt"))
                     torch.save(self.initweights, os.path.join(self.source_dir, f"tutteinitweights_{self.args.softpoisson}.pt"))
+
+                    np.save(os.path.join(self.source_dir, f"cutvs.npy"), self.cutvs)
+                    np.save(os.path.join(self.source_dir, f"cutfs.npy"), self.cutfs)
 
             ## Store in loaded data so it gets mapped to device
             # Remove extraneous dimension
@@ -656,7 +661,7 @@ class SourceMesh:
                 self.slimtranslate = (checkslim - pred_V)[:,:,:2]
 
                 # Cache everything
-                if new_init == "constant" or not new_init:
+                if not new_init:
                     torch.save(self.slimfuv, os.path.join(self.source_dir, "slimfuv.pt"))
                     torch.save(self.slimuv, os.path.join(self.source_dir, "slimuv.pt"))
                     torch.save(self.slimj, os.path.join(self.source_dir, "slimj.pt"))
@@ -770,7 +775,7 @@ class SourceMesh:
                 self.isotranslate = self.isofuv - pred_V
 
                 # Cache everything
-                if new_init == "constant" or not new_init:
+                if not new_init:
                     torch.save(self.isofuv, os.path.join(self.source_dir, "isofuv.pt"))
                     torch.save(self.isoj, os.path.join(self.source_dir, "isoj.pt"))
                     torch.save(self.isotranslate, os.path.join(self.source_dir, "isotranslate.pt"))

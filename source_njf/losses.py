@@ -95,7 +95,7 @@ class UVLoss:
                                                       stitchweights=stitchweights, source = source,
                                                       keepidxs = keepidxs)
             for k, v in stitchingdict.items():
-                self.currentloss[self.count][k] = v.detach().cpu().numpy()
+                self.currentloss[self.count][k] = weightdict[k] * v.detach().cpu().numpy()
                 loss += weightdict[k] * torch.sum(v)
 
             # Edge sep always goes into lossdict for visualization purposes
@@ -106,15 +106,15 @@ class UVLoss:
         if self.args.lossdistortion == "arap":
             distortionenergy = arap(vertices, faces, uv, paramtris=uv,
                                 device=self.device, renormalize=False,
-                                return_face_energy=True, timeit=False)
-            self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
+                                return_face_energy=True, timeit=False, elen_normalize=self.args.arapnorm)
+            self.currentloss[self.count]['distortionloss'] = self.args.distortion_weight * distortionenergy.detach().cpu().numpy()
 
             if not self.args.losscount:
                 loss += self.args.distortion_weight * torch.sum(distortionenergy)
 
         if self.args.lossdistortion == "dirichlet":
             distortionenergy = symmetricdirichlet(vertices, faces, jacobians.squeeze(), init_jacob=initjacobs)
-            self.currentloss[self.count]['distortionloss'] = distortionenergy.detach().cpu().numpy()
+            self.currentloss[self.count]['distortionloss'] = self.args.distortion_weight * distortionenergy.detach().cpu().numpy()
 
             if not self.args.losscount:
                 loss += self.args.distortion_weight * torch.sum(distortionenergy)
@@ -122,7 +122,7 @@ class UVLoss:
         # Cut sparsity loss
         if self.args.sparsecutsloss:
             sparseloss = parabolaloss(weights).mean()
-            self.currentloss[self.count]['sparsecutsloss'] = sparseloss.detach().cpu().numpy()
+            self.currentloss[self.count]['sparsecutsloss'] = self.args.sparsecuts_weight * sparseloss.detach().cpu().numpy()
             loss += self.args.sparsecuts_weight * sparseloss
 
         self.currentloss[self.count]['total'] = loss.item()
@@ -183,6 +183,7 @@ def symmetricdirichlet(vs, fs, jacob=None, init_jacob=None):
     return energy
 
 def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renormalize=False,
+         elen_normalize=False,
          face_weights=None, normalize_filter=0, device=torch.device("cpu"), verbose=False, timeit=False, **kwargs):
     from source_njf.utils import get_local_tris
     local_tris = get_local_tris(vertices, faces, device=device)
@@ -312,8 +313,12 @@ def arap(vertices, faces, param, return_face_energy=True, paramtris=None, renorm
 
     # NOTE: We normalize by mean edge length b/w p and e b/c for shrinking ARAP is bounded by edge length
     # Normalizing by avg edge length b/w p and e => ARAP bounded by 2 on BOTH SIDES
-    mean_elen = (torch.linalg.norm(e_full, dim=2) + torch.linalg.norm(e_p_full, dim=2))/2
-    arap_tris = torch.sum(cot_full * 1/mean_elen * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0) # F x 1
+    if elen_normalize:
+        mean_elen = (torch.linalg.norm(e_full, dim=2) + torch.linalg.norm(e_p_full, dim=2))/2
+        arap_tris = torch.sum(cot_full * 1/mean_elen * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0) # F x 1
+    else:
+        arap_tris = torch.sum(cot_full * torch.linalg.norm(e_p_full - rot_e_full, dim=2) ** 2, dim=0) # F x 1
+
     if timeit == True:
         print(f"ARAP calculation: {time.time()-t0:0.5f}")
 

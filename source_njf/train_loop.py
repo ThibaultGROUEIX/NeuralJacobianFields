@@ -726,10 +726,10 @@ class MyNet(pl.LightningModule):
                 # plot ours
                 axs.set_title(f"Epoch {self.current_epoch:05}: SP Weights")
                 axs.hist(batch_parts['weights'], bins=20)
-                plt.savefig(os.path.join(save_path, f"weights_epoch_{self.current_epoch:05}.png"))
+                plt.savefig(os.path.join(save_path, f"weights_epoch_{self.current_epoch:05}_batch{batch_idx}.png"))
                 plt.close(fig)
                 plt.cla()
-                self.logger.log_image(key='weights', images=[os.path.join(save_path, f"weights_epoch_{self.current_epoch:05}.png")],
+                self.logger.log_image(key='weights', images=[os.path.join(save_path, f"weights_epoch_{self.current_epoch:05}_batch{batch_idx}.png")],
                                       step=self.current_epoch)
 
             # NOTE: batch_parts['T'] = triangle soup indexing if no poisson solve
@@ -747,7 +747,7 @@ class MyNet(pl.LightningModule):
                     uv = source.isofuv.reshape(-1, 2)
                     uvfs = np.arange(len(uv)).reshape(-1, 3)
 
-                plot_uv(save_path, f"{self.args.init} init epoch {self.current_epoch:05}", uv.squeeze().detach().cpu().numpy(),
+                plot_uv(save_path, f"{self.args.init} init epoch {self.current_epoch:05} batch {batch_idx}", uv.squeeze().detach().cpu().numpy(),
                             uvfs, losses=None, facecolors = np.arange(len(uvfs))/(len(uvfs)))
 
                 # Also plot the full boundary
@@ -762,8 +762,8 @@ class MyNet(pl.LightningModule):
                     totboundaries.append(np.array(boundaryvs)[bidx])
                 if len(totboundaries) > 0:
                     totboundaries = np.concatenate(totboundaries, axis=0)
-                    export_views(source.cutvs, source.cutfs, save_path, filename=f"boundary_mesh_{self.current_epoch:05}.png",
-                                    plotname=f"Initial Mesh Boundary", cylinders=totboundaries,
+                    export_views(source.cutvs, source.cutfs, save_path, filename=f"boundary_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
+                                    plotname=f"Initial Mesh Boundary Batch {batch_idx}", cylinders=totboundaries,
                                     device="cpu", n_sample=30, width=200, height=200,
                                     vmin=0, vmax=1, shading=False)
 
@@ -859,7 +859,7 @@ class MyNet(pl.LightningModule):
                             edgecorrespondences=source.edgecorrespondences, source=source,
                             keepidxs = keepidxs)
             else:
-                plot_uv(save_path, f"epoch {self.current_epoch:05}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
+                plot_uv(save_path, f"epoch {self.current_epoch:05} batch {batch_idx}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
                         batch_parts["T"].squeeze(), losses=lossdict[0], cmin=0, cmax=2, dmin=0, dmax=1,
                         facecolors = np.arange(len(batch_parts["T"].squeeze()))/(len(batch_parts["T"].squeeze())),
                         edges = soup_cutedges_stitch, edgecolors = soup_cutedgecolors_stitch,
@@ -867,13 +867,13 @@ class MyNet(pl.LightningModule):
                         keepidxs = keepidxs)
 
             # Log the plotted imgs
-            images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}.png")] + \
-                        [os.path.join(save_path, f"{key}_epoch_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+            images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}_batch_{batch_idx}.png")] + \
+                        [os.path.join(save_path, f"{key}_epoch_{self.current_epoch:05}_batch_{batch_idx}.png") for key in lossdict[0].keys() if "loss" in key]
 
             if self.args.init in ['tutte', 'slim'] and self.args.ninit == -1:
-                images = [os.path.join(save_path, f"{self.args.init}_init_epoch_{self.current_epoch:05}.png")] + images
+                images = [os.path.join(save_path, f"{self.args.init}_init_epoch_{self.current_epoch:05}_batch_{batch_idx}.png")] + images
             elif self.current_epoch == 0 and self.args.init:
-                images = [os.path.join(save_path, f"{self.args.init}_init_epoch_{self.current_epoch:05}.png")] + images
+                images = [os.path.join(save_path, f"{self.args.init}_init_epoch_{self.current_epoch:05}_batch_{batch_idx}.png")] + images
 
             # Filter out all renders that dont exist
             images = [imgpath for imgpath in images if os.path.exists(imgpath)]
@@ -930,7 +930,7 @@ class MyNet(pl.LightningModule):
 
             # Stitch cut
             if len(cylinderpos) > 0:
-                export_views(ogvs, batch_parts["ogT"], save_path, filename=f"stitchcuts_mesh_{self.current_epoch:05}.png",
+                export_views(ogvs, batch_parts["ogT"], save_path, filename=f"stitchcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                             plotname=f"Total stitchcut len: {cutlen:0.5f}", cylinders=cylinderpos,
                             outline_width=0.01, cmap = plt.get_cmap('Reds_r'),
                             device="cpu", n_sample=30, width=200, height=200,
@@ -942,7 +942,7 @@ class MyNet(pl.LightningModule):
             cutlen = torch.sum(source.elens_nobound[topo_cutedges_weight]).item()
 
             if len(cylinderpos) > 0:
-                export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weightcuts_mesh_{self.current_epoch:05}.png",
+                export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weightcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                             plotname=f"Total weight cut len: {cutlen:0.5f}", cylinders=cylinderpos,
                             outline_width=0.01, cmap = plt.get_cmap('Reds_r'),
                             device="cpu", n_sample=30, width=200, height=200,
@@ -953,16 +953,16 @@ class MyNet(pl.LightningModule):
             cylinderpos = ogvs[source.ogedge_vpairs_nobound.detach().cpu().numpy()]
             cylindervals = np.stack([weights, weights], axis=1) # E x 2
 
-            export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weights_mesh_{self.current_epoch:05}.png",
+            export_views(ogvs, batch_parts["ogT"], save_path, filename=f"weights_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                         plotname=f"Edge Weights", cylinders=cylinderpos,
                         cylinder_scalars=cylindervals,
                         outline_width=0.01, cmap = plt.get_cmap('Reds_r'),
                         device="cpu", n_sample=30, width=200, height=200,
                         vmin=0, vmax=1, shading=False)
 
-            images = [os.path.join(save_path, f"weights_mesh_{self.current_epoch:05}.png")]
-            if os.path.exists(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}.png")):
-                images.append(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}.png"))
+            images = [os.path.join(save_path, f"weights_mesh_{self.current_epoch:05}_batch{batch_idx}.png")]
+            if os.path.exists(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png")):
+                images.append(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png"))
 
             self.logger.log_image(key='pred weight', images=images, step=self.current_epoch)
 
@@ -991,7 +991,7 @@ class MyNet(pl.LightningModule):
                             vseplosses[k] = v / vlosscount[k]
 
                         # NOTE: can't let mesh re-export the faces because the indexing will be off
-                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                                     plotname=f"Avg {key}: {np.mean(val):0.4f}", outline_width=0.01,
                                     vcolor_vals=vseplosses,
                                     device="cpu", n_sample=30, width=200, height=200,
@@ -1010,7 +1010,7 @@ class MyNet(pl.LightningModule):
                         if len(subcylinders) == 0:
                             subcylinders = None
 
-                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                                     plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
                                     cylinder_scalars=cylindervals, outline_width=0.01,
                                     device="cpu", n_sample=30, width=200, height=200,
@@ -1030,23 +1030,26 @@ class MyNet(pl.LightningModule):
                             cylindervals.append([np.sum(val[count]), np.sum(val[count])])
                             count += 1
 
-                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        export_views(ogvs, batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                                     plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
                                     cylinder_scalars=cylindervals, outline_width=0.01,
                                     device="cpu", n_sample=30, width=200, height=200,
                                     vmin=0, vmax=0.5, shading=False)
                     elif key == "distortionloss":
-                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path,
+                                     filename=f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                                         plotname=f"Avg {key}: {np.mean(val):0.4f}",
                                         fcolor_vals=val, device="cpu", n_sample=30, width=200, height=200,
                                         vmin=0, vmax=1, shading=False)
                     elif key == "invjloss":
-                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path,
+                                     filename=f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                                         plotname=f"Avg {key}: {np.mean(val):0.4f}",
                                         fcolor_vals=val, device="cpu", n_sample=30, width=200, height=200,
                                         vmin=0, vmax=1, shading=False)
                     elif key == "fliploss":
-                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path, filename=f"{key}_mesh_{self.current_epoch:05}.png",
+                        export_views(batch_parts["source_V"].detach().cpu().numpy(), batch_parts["ogT"], save_path,
+                                     filename=f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png",
                                         plotname=f"Avg {key}: {np.mean(val):0.4f}",
                                         fcolor_vals=val, device="cpu", n_sample=30, width=200, height=200,
                                         vmin=0, vmax=0.6, shading=False)
@@ -1054,10 +1057,10 @@ class MyNet(pl.LightningModule):
                         continue
 
             # Log together: 3D surface losses + initial tutte cut
-            images = [os.path.join(save_path, f"{key}_mesh_{self.current_epoch:05}.png") for key in lossdict[0].keys() if "loss" in key]
+            images = [os.path.join(save_path, f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png") for key in lossdict[0].keys() if "loss" in key]
             if (self.args.init in ["tutte", "slim"] and self.args.ninit == -1) or \
                 (self.current_epoch == 0 and self.args.init):
-                boundary_path = os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}.png")
+                boundary_path = os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}_batch{batch_idx}.png")
                 if os.path.exists(boundary_path):
                     images = [boundary_path] + images
 
@@ -1127,6 +1130,16 @@ class MyNet(pl.LightningModule):
             pred_J_restricted_poiss = pred_J_restricted_poiss[:,:,:2]
 
         ## Stitching loss schedule
+        if self.args.stitchschedule == "linear":
+            ratio = self.global_step/self.trainer.max_epochs
+            edgecut_weight = ratio * self.args.edgecut_weight_max + (1 - ratio) * self.args.edgecut_weight_min
+            self.args.edgecut_weight = edgecut_weight
+        elif self.args.stitchschedule == "cosine":
+            ratio = self.global_step/self.args.sparse_cosine_steps
+            edgecut_weight = self.args.edgecut_weight_max - 0.5 * (self.args.edgecut_weight_max - self.args.edgecut_weight_min) * (1 + np.cos(np.pi * ratio))
+            self.args.edgecut_weight = edgecut_weight
+
+        ## Sparse loss schedule
         if self.args.sparse_schedule == "linear":
             ratio = self.global_step/self.trainer.max_epochs
             sparsecuts_weight = ratio * self.args.sparselossweight_max + (1 - ratio) * self.args.sparselossweight_min
