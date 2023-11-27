@@ -276,6 +276,8 @@ class SourceMesh:
                     self.initweights = torch.ones(len(self.edge_vpairs), device=device).double() * -10
                 else:
                     self.initweights = torch.ones(len(self.edge_vpairs), device=device).double()
+            elif self.args.spweight == "softmax":
+                self.initweights = torch.ones(len(self.edge_vpairs), device=device).double()
             elif self.args.spweight in ["seamless", 'cosine']:
                 if self.init == "isometric":
                     self.initweights = torch.zeros(len(self.edge_vpairs), device=device).double()
@@ -432,6 +434,8 @@ class SourceMesh:
 
                             if self.args.spweight == "sigmoid":
                                 self.initweights[eidx_nobound] = -10
+                            elif self.args.spweight == "softmax":
+                                self.initweights[eidx_nobound] = 0
                             elif self.args.spweight in ["seamless", "cosine"]:
                                 self.initweights[eidx_nobound] = -0.5
 
@@ -621,6 +625,8 @@ class SourceMesh:
 
                             if self.args.spweight == "sigmoid":
                                 self.initweights[eidx_nobound] = -10
+                            elif self.args.spweight == "softmax":
+                                self.initweights[eidx_nobound] = -2
                             elif self.args.spweight in ["seamless", "cosine"]:
                                 self.initweights[eidx_nobound] = -0.5
 

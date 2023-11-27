@@ -58,15 +58,19 @@ class DeformationDataset(Dataset):
         self.source_and_target = []
 
         # NOTE: duplicate source for however many initializations we need
+        # HACK: If accumulating batch grads need to duplicate as well
+        batchgrads = args.accumulate_grad_batches
         for s,ts in source_target.items():
             chunks = np.split(ts, np.arange(args.targets_per_batch,len(ts),args.targets_per_batch))
             if args.ninit > 0:
                 for _ in range(args.ninit):
+                    for _ in range(batchgrads):
+                        for chunk in chunks:
+                            self.source_and_target.append((s,chunk))
+            else:
+                for _ in range(batchgrads):
                     for chunk in chunks:
                         self.source_and_target.append((s,chunk))
-            else:
-                for chunk in chunks:
-                    self.source_and_target.append((s,chunk))
 
         self.source_keys = source_keys
         self.s_and_t = s_and_t
@@ -163,6 +167,11 @@ class DeformationDataset(Dataset):
         target = None
         # Single source single target
         source_index ,target_index = self.source_and_target[ind]
+
+        # NOTE: HACK
+        if self.args.accumulate_grad_batches > 1:
+            ind = 0
+
         for i,target in enumerate(target_index):
             if Path(target).suffix in [ '.obj' , '.off', '.ply']:
                 # NOTE: Below caches the vertices/faces + creates the directory

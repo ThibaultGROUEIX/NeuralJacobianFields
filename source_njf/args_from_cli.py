@@ -39,8 +39,9 @@ def get_arg_parser():
 	parser.add_argument('--arch', type=str, choices={'diffusionnet', 'meshcnn', 'mlp'}, help="architecture to use", default='mlp')
 	parser.add_argument('--softpoisson', type=str, choices={'edges', 'valid'}, help="SOFT POISSON", default=None)
 	parser.add_argument('--sparsepoisson', action="store_true")
-	parser.add_argument("--spweight", choices={'sigmoid', 'seamless', 'cosine'}, type=str,
-						help = "how to map dot product to soft poisson weights", default='cosine')
+	parser.add_argument("--spweight", choices={'sigmoid', 'seamless', 'cosine', 'softmax'}, type=str,
+						help = "how to map dot product to soft poisson weights", default='sigmoid')
+	parser.add_argument("--softmax", help="softmax the predicted weights",action="store_true")
 	parser.add_argument("--fft", type=int,
 							default=0)
 	parser.add_argument("--fftscale", type=int,
@@ -56,6 +57,7 @@ def get_arg_parser():
 
 	### TRAINING
 	parser.add_argument("--continuetrain", help='continue training', action="store_true")
+	parser.add_argument("--checkpointdir", help='directory to ckpt if continue train', type = str, default=None)
 	parser.add_argument("--split_train_set", help="split the train set to create a test set",
 						action="store_true")
 	parser.add_argument("--train_percentage",help = "the train/test split in percentage, default is 90",default=90,type=int)
@@ -150,7 +152,8 @@ def get_arg_parser():
 
 	# Weights
 	parser.add_argument("--stitchschedule", help = "apply linear schedule on stitching loss", type=str,
-                     choices={'linear', 'cosine'}, default=None)
+                     choices={'linear', 'cosine', 'constant'}, default=None)
+	parser.add_argument("--stitchschedule_constant", help="% threshold to start enforcing stitch", default=0, type=float)
 	parser.add_argument("--edgegrad_weight", help="loss weight", default=1, type=float)
 	parser.add_argument("--edgecut_weight", help="loss weight", default=1, type=float)
 	parser.add_argument("--edgecut_weight_max", help="max edge cut weight", default=1, type=float)

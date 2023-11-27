@@ -7,7 +7,7 @@ import os
 import fresnel
 
 def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None, cmin=0, cmax=2,
-            dmin=0, dmax=0.1,
+            stitchweight=0.1, dmin=0, dmax=1,
             facecolors = None, edges = None, edgecolors = None, source = None, valid_edges_to_soup = None,
             cmap = plt.get_cmap("tab20"), edge_cmap=plt.get_cmap("gist_rainbow"), edgecorrespondences=None,
             keepidxs=None,
@@ -130,7 +130,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     fig.suptitle(f"Total Edge Cut Loss: {np.sum(edgecutloss):0.8f}")
 
                     cmap = plt.get_cmap("Reds")
-                    norm = mpl.colors.Normalize(vmin=0, vmax=0.1)
+                    norm = mpl.colors.Normalize(vmin=0, vmax=stitchweight)
                     scalarmap = cm.ScalarMappable(norm=norm, cmap=cmap)
 
                     # Plot color-coded triangles and color the edges based on losses
@@ -198,7 +198,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
                     cmap = plt.get_cmap("Reds")
                     axs.tripcolor(tris, val[:len(triangles)], facecolors=val[:len(triangles)], cmap=cmap,
-                                linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
+                                linewidth=0.1, vmin=dmin, vmax=dmax, edgecolor="black")
 
                     # Plot edges if given
                     if edges is not None or len(edges) > 0:

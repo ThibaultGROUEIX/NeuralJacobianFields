@@ -135,7 +135,10 @@ class Experiment(ABC):
             gen = self.get_encoder(args)
         else: # Load latest checkpoint model based on checkpoints folder in output path
             import re
-            checkpointdir = os.path.join(self.args.outputdir, self.args.expname, "ckpt")
+            # NOTE: Checkpointdir lets us train from pre-init weights
+            checkpointdir = self.args.checkpointdir
+            if checkpointdir is None:
+                checkpointdir = os.path.join(self.args.outputdir, self.args.expname, "ckpt")
             if os.path.exists(checkpointdir):
                 maxepoch = 0
                 maxstep = 0

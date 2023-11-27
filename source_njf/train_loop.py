@@ -110,6 +110,10 @@ class MyNet(pl.LightningModule):
                     self.face_decoder[-1].bias.data.zero_()
                     self.face_decoder[-1].weight.data.zero_()
 
+            ## TODO
+            elif self.arch == "attention":
+                pass
+
             elif self.arch == "mlp":
                 self.face_decoder = nn.Sequential(nn.Linear(input_dim, 128),
                                                     nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
@@ -330,7 +334,18 @@ class MyNet(pl.LightningModule):
             edgevals = self.edge_decoder(edgecodes).squeeze()
 
             # Compute edge weights
-            weights = -torch.sigmoid(edgevals + source.initweights.to(edgevals.device))
+            if self.args.spweight == "sigmoid":
+                weights = -torch.sigmoid(edgevals + source.initweights.to(edgevals.device))
+            # Softmax the weights
+            elif self.args.spweight == "softmax":
+                weights = torch.softmax(edgevals + source.initweights.to(edgevals.device), dim=0)
+                weights *= len(weights) # Normalize by number of weights
+                weights = -weights
+
+        # TODO: take SA-computed face latents => cosine similarity => dclamp(-2, 2) => add 1 div 2 (0 - 1 scaling)
+        #                                     => face decoder MLP => jacobians
+        elif self.arch == 'attention':
+            pass
 
         elif self.arch == 'mlp':
             # NOTE: soft poisson weights will be dot product of "face latents" predicted per triangle for corresponding faces
@@ -346,6 +361,10 @@ class MyNet(pl.LightningModule):
             elif self.args.spweight == "cosine":
                 facesim = dclamp(torch.nn.functional.cosine_similarity(facelatents[facepairs[:,0]], facelatents[facepairs[:,1]]) \
                                 + source.initweights.to(facelatents.device), 1e-7, 1)
+            elif self.args.spweight == "softmax":
+                facedot = torch.sum(facelatents[facepairs[:,0]] * facelatents[facepairs[:,1]], dim=1)
+                facesim = torch.softmax(facedot + source.initweights.to(facedot.device))
+                facesim *= len(facesim)
             else:
                 raise Exception(f"Unknown soft poisson weight type: {self.args.spweight}.")
             weights = -facesim
@@ -359,6 +378,7 @@ class MyNet(pl.LightningModule):
 
             if self.args.optweight:
                 weights = -dclamp(self.trainer.optimizers[0].param_groups[1]['params'][0] + source.initweights.to(facelatents.device), 1e-7, 1)
+
 
         # No global codes
         if self.args.dense or codes is None:
@@ -560,10 +580,11 @@ class MyNet(pl.LightningModule):
 
         batch_parts = self.my_step(source_batches, batch_id)
 
-        # torch.cuda.synchronize()
-        # print(f"training_step  {time.time() - start}")
-        # self.log("V_loss", self.__vertex_loss_weight * a['vertex_loss'].item(), prog_bar=True, logger=False)
-        # self.log("J_loss", a['jacobian_loss'].item(), prog_bar=True, logger=False)
+        # Log scheduled weights
+        if self.args.stitchschedule:
+            self.log('edgecut_weight', self.args.edgecut_weight, logger=True, batch_size=1)
+        if self.args.sparse_schedule:
+            self.log('sparsecuts_weight', self.args.sparsecuts_weight, logger=True, batch_size=1)
 
         loss = batch_parts["loss"]
         lossrecord = batch_parts["lossdict"]
@@ -748,7 +769,8 @@ class MyNet(pl.LightningModule):
                     uvfs = np.arange(len(uv)).reshape(-1, 3)
 
                 plot_uv(save_path, f"{self.args.init} init epoch {self.current_epoch:05} batch {batch_idx}", uv.squeeze().detach().cpu().numpy(),
-                            uvfs, losses=None, facecolors = np.arange(len(uvfs))/(len(uvfs)))
+                        uvfs, losses=None, facecolors = np.arange(len(uvfs))/(len(uvfs)),
+                        stitchweight=self.args.edgecut_weight)
 
                 # Also plot the full boundary
                 initfaces = batch_parts["ogT"]
@@ -857,14 +879,14 @@ class MyNet(pl.LightningModule):
                             facecolors = np.arange(len(batch_parts["T"][idx].squeeze()))/(len(batch_parts["T"][idx].squeeze())),
                             edges = soup_cutedges_stitch, edgecolors = soup_cutedgecolors_stitch,
                             edgecorrespondences=source.edgecorrespondences, source=source,
-                            keepidxs = keepidxs)
+                            keepidxs = keepidxs, stitchweight=self.args.edgecut_weight)
             else:
                 plot_uv(save_path, f"epoch {self.current_epoch:05} batch {batch_idx}", batch_parts["pred_V"].squeeze().detach().cpu().numpy(),
                         batch_parts["T"].squeeze(), losses=lossdict[0], cmin=0, cmax=2, dmin=0, dmax=1,
                         facecolors = np.arange(len(batch_parts["T"].squeeze()))/(len(batch_parts["T"].squeeze())),
                         edges = soup_cutedges_stitch, edgecolors = soup_cutedgecolors_stitch,
                         edgecorrespondences=source.edgecorrespondences, source=source,
-                        keepidxs = keepidxs)
+                        keepidxs = keepidxs, stitchweight=self.args.edgecut_weight)
 
             # Log the plotted imgs
             images = [os.path.join(save_path, f"epoch_{self.current_epoch:05}_batch_{batch_idx}.png")] + \
@@ -911,7 +933,7 @@ class MyNet(pl.LightningModule):
                 plot_uv(save_path, f"hard poisson epoch {self.current_epoch:05} seam length {np.sum(seamlengths):04f}", hardpoisson_uv,
                             cutfs, losses={'distortionloss': distortionenergy.detach().cpu().numpy()},
                             edges = hp_edges, edgecolors=hp_ecolors, keepidxs = keepidxs,
-                            facecolors = np.arange(len(cutfs))/(len(cutfs)))
+                            facecolors = np.arange(len(cutfs))/(len(cutfs)), stitchweight=self.args.edgecut_weight)
 
                 images = [os.path.join(save_path, f"hard_poisson_epoch_{self.current_epoch:05}_seam_length_{np.sum(seamlengths):04f}.png")] + \
                         [os.path.join(save_path, f"distortionloss_hard_poisson_epoch_{self.current_epoch:05}_seam_length_{np.sum(seamlengths):04f}.png")]
@@ -961,9 +983,13 @@ class MyNet(pl.LightningModule):
                         vmin=0, vmax=1, shading=False)
 
             images = [os.path.join(save_path, f"weights_mesh_{self.current_epoch:05}_batch{batch_idx}.png")]
-            if os.path.exists(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png")):
-                images.append(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png"))
-
+            # if os.path.exists(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png")):
+            #     images.append(os.path.join(save_path, f"weightcuts_mesh_{self.current_epoch:05}_batch{batch_idx}.png"))
+            if (self.args.init in ["tutte", "slim"] and self.args.ninit == -1) or \
+                (self.current_epoch == 0 and self.args.init):
+                boundary_path = os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}_batch{batch_idx}.png")
+                if os.path.exists(boundary_path):
+                    images = [boundary_path] + images
             self.logger.log_image(key='pred weight', images=images, step=self.current_epoch)
 
             edgecorrespondences = source.edgecorrespondences
@@ -1014,7 +1040,7 @@ class MyNet(pl.LightningModule):
                                     plotname=f"Avg {key}: {np.mean(val):0.4f}", cylinders=cylinderpos,
                                     cylinder_scalars=cylindervals, outline_width=0.01,
                                     device="cpu", n_sample=30, width=200, height=200,
-                                    vmin=0, vmax=0.1, shading=False,
+                                    vmin=0, vmax=self.args.edgecut_weight, shading=False,
                                     subcylinders = subcylinders)
 
                     elif key == "edgegradloss": # E x 2
@@ -1058,11 +1084,6 @@ class MyNet(pl.LightningModule):
 
             # Log together: 3D surface losses + initial tutte cut
             images = [os.path.join(save_path, f"{key}_mesh_{self.current_epoch:05}_batch{batch_idx}.png") for key in lossdict[0].keys() if "loss" in key]
-            if (self.args.init in ["tutte", "slim"] and self.args.ninit == -1) or \
-                (self.current_epoch == 0 and self.args.init):
-                boundary_path = os.path.join(save_path, f"boundary_mesh_{self.current_epoch:05}_batch{batch_idx}.png")
-                if os.path.exists(boundary_path):
-                    images = [boundary_path] + images
 
             # Filter out all renders that dont exist
             images = [imgpath for imgpath in images if os.path.exists(imgpath)]
@@ -1131,21 +1152,35 @@ class MyNet(pl.LightningModule):
 
         ## Stitching loss schedule
         if self.args.stitchschedule == "linear":
-            ratio = self.global_step/self.trainer.max_epochs
+            ratio = self.current_epoch/self.trainer.max_epochs
             edgecut_weight = ratio * self.args.edgecut_weight_max + (1 - ratio) * self.args.edgecut_weight_min
             self.args.edgecut_weight = edgecut_weight
+            # NOTE: Need this hack bc when lossfcn is loaded from weights args is a separate object
+            self.lossfcn.args.edgecut_weight = edgecut_weight
         elif self.args.stitchschedule == "cosine":
-            ratio = self.global_step/self.args.sparse_cosine_steps
+            ratio = self.current_epoch/self.args.sparse_cosine_steps
             edgecut_weight = self.args.edgecut_weight_max - 0.5 * (self.args.edgecut_weight_max - self.args.edgecut_weight_min) * (1 + np.cos(np.pi * ratio))
             self.args.edgecut_weight = edgecut_weight
+            # NOTE: Need this hack bc when lossfcn is loaded from weights args is a separate object
+            self.lossfcn.args.edgecut_weight = edgecut_weight
+        elif self.args.stitchschedule == "constant":
+            ratio = self.current_epoch/self.trainer.max_epochs
+            if ratio < self.args.stitchschedule_constant:
+                edgecut_weight = 0
+                self.args.edgecut_weight = 0
+            else:
+                edgecut_weight = self.args.edgecut_weight_max
+                self.args.edgecut_weight = self.args.edgecut_weight_max
+            # NOTE: Need this hack bc when lossfcn is loaded from weights args is a separate object
+            self.lossfcn.args.edgecut_weight = edgecut_weight
 
         ## Sparse loss schedule
         if self.args.sparse_schedule == "linear":
-            ratio = self.global_step/self.trainer.max_epochs
+            ratio = self.current_epoch/self.trainer.max_epochs
             sparsecuts_weight = ratio * self.args.sparselossweight_max + (1 - ratio) * self.args.sparselossweight_min
             self.args.sparsecuts_weight = sparsecuts_weight
         elif self.args.sparse_schedule == "cosine":
-            ratio = self.global_step/self.args.sparse_cosine_steps
+            ratio = self.current_epoch/self.args.sparse_cosine_steps
             sparsecuts_weight = self.args.stitchlossweight_max - 0.5 * (self.args.stitchlossweight_max - self.args.stitchlossweight_min) * (1 + np.cos(np.pi * ratio))
             self.args.sparsecuts_weight = sparsecuts_weight
 
@@ -1157,6 +1192,25 @@ class MyNet(pl.LightningModule):
 
         lossrecord = self.lossfcn.exportloss()
         self.lossfcn.clear() # This resets the loss record dictionary
+
+        ### ==== SDS Losses ==== ###
+        if self.args.sdsloss:
+            # Prereqs: texture image, texture description
+            assert self.args.textureimg is not None and self.args.texturetext is not None, "Need to specify textureimg and texturetext for SDS loss"
+
+            from diffusion_guidance.deepfloyd_if import DeepFloydIF
+            diffusion = DeepFloydIF() # optionally you can pass a config at initialization
+
+            # Text encoding
+            text_z, text_z_neg = diffusion.encode_prompt(self.args.texturetext)
+
+            # TODO: Render texture image on mesh for randomly sampled views
+            from PIL import Image
+            from torchvision.transforms.functional import pil_to_tensor
+            textureimg = pil_to_tensor(Image.open(self.args.textureimg))
+
+            sds = self.diffusion(rgb_images, text_z_inputs, text_z_neg_inputs)
+            sdsloss = sds['loss_sds']
 
         # If running stitchweights, then update here
         # NOTE: stitchweights is len(valid_pairs) but weights is len(valid_edges)
