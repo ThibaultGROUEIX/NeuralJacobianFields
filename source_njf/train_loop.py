@@ -82,11 +82,11 @@ class MyNet(pl.LightningModule):
                 edge_decoder_dim = 1
                 self.edge_decoder = nn.Sequential(nn.Linear(self.args.vertexdim, 128),
                                             nn.ReLU(),
-                                            nn.Linear(128, 128),
+                                            nn.Linear(128, 64),
                                             nn.ReLU(),
-                                            nn.Linear(128, 128),
+                                            nn.Linear(64, 32),
                                             nn.ReLU(),
-                                            nn.Linear(128, edge_decoder_dim),
+                                            nn.Linear(32, edge_decoder_dim),
                                             )
 
                 # Initialize edge weights to 0
@@ -94,15 +94,15 @@ class MyNet(pl.LightningModule):
                 self.edge_decoder[-1].weight.data.zero_()
 
                 self.face_decoder = nn.Sequential(nn.Linear(self.args.vertexdim, 128),
-                                            nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
+                                            # nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
                                             nn.ReLU(),
-                                            nn.Linear(128, 128),
-                                            nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
+                                            nn.Linear(128, 64),
+                                            # nn.GroupNorm(num_groups=4, num_channels=128), # , eps=0.0001 I have considered increasing this value in case we have channels from pointnet with the same values.
                                             nn.ReLU(),
-                                            nn.Linear(128, 128),
-                                            nn.GroupNorm(num_groups=4, num_channels=128),
+                                            nn.Linear(64, 32),
+                                            # nn.GroupNorm(num_groups=4, num_channels=128),
                                             nn.ReLU(),
-                                            nn.Linear(128, face_decoder_dim),
+                                            nn.Linear(32, face_decoder_dim),
                                             )
 
                 self.__IDENTITY_INIT = self.args.identity
@@ -338,8 +338,7 @@ class MyNet(pl.LightningModule):
                 weights = -torch.sigmoid(edgevals + source.initweights.to(edgevals.device))
             # Softmax the weights
             elif self.args.spweight == "softmax":
-                weights = torch.softmax(edgevals + source.initweights.to(edgevals.device), dim=0)
-                weights *= len(weights) # Normalize by number of weights
+                weights = torch.softmax(edgevals + source.initweights.to(edgevals.device), dim=0) * len(edgevals) # Normalize by number of weights
                 weights = -weights
 
         # TODO: take SA-computed face latents => cosine similarity => dclamp(-2, 2) => add 1 div 2 (0 - 1 scaling)
@@ -363,8 +362,7 @@ class MyNet(pl.LightningModule):
                                 + source.initweights.to(facelatents.device), 1e-7, 1)
             elif self.args.spweight == "softmax":
                 facedot = torch.sum(facelatents[facepairs[:,0]] * facelatents[facepairs[:,1]], dim=1)
-                facesim = torch.softmax(facedot + source.initweights.to(facedot.device))
-                facesim *= len(facesim)
+                facesim = torch.softmax(facedot + source.initweights.to(facedot.device)) * len(facesim)
             else:
                 raise Exception(f"Unknown soft poisson weight type: {self.args.spweight}.")
             weights = -facesim
@@ -1194,23 +1192,23 @@ class MyNet(pl.LightningModule):
         self.lossfcn.clear() # This resets the loss record dictionary
 
         ### ==== SDS Losses ==== ###
-        if self.args.sdsloss:
-            # Prereqs: texture image, texture description
-            assert self.args.textureimg is not None and self.args.texturetext is not None, "Need to specify textureimg and texturetext for SDS loss"
+        # if self.args.sdsloss:
+        #     # Prereqs: texture image, texture description
+        #     assert self.args.textureimg is not None and self.args.texturetext is not None, "Need to specify textureimg and texturetext for SDS loss"
 
-            from diffusion_guidance.deepfloyd_if import DeepFloydIF
-            diffusion = DeepFloydIF() # optionally you can pass a config at initialization
+        #     from diffusion_guidance.deepfloyd_if import DeepFloydIF
+        #     diffusion = DeepFloydIF() # optionally you can pass a config at initialization
 
-            # Text encoding
-            text_z, text_z_neg = diffusion.encode_prompt(self.args.texturetext)
+        #     # Text encoding
+        #     text_z, text_z_neg = diffusion.encode_prompt(self.args.texturetext)
 
-            # TODO: Render texture image on mesh for randomly sampled views
-            from PIL import Image
-            from torchvision.transforms.functional import pil_to_tensor
-            textureimg = pil_to_tensor(Image.open(self.args.textureimg))
+        #     # TODO: Render texture image on mesh for randomly sampled views
+        #     from PIL import Image
+        #     from torchvision.transforms.functional import pil_to_tensor
+        #     textureimg = pil_to_tensor(Image.open(self.args.textureimg))
 
-            sds = self.diffusion(rgb_images, text_z_inputs, text_z_neg_inputs)
-            sdsloss = sds['loss_sds']
+        #     sds = self.diffusion(rgb_images, text_z_inputs, text_z_neg_inputs)
+        #     sdsloss = sds['loss_sds']
 
         # If running stitchweights, then update here
         # NOTE: stitchweights is len(valid_pairs) but weights is len(valid_edges)
