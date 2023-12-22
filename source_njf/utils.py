@@ -14,6 +14,10 @@ def clear_directory(path):
         except Exception as e:
             print('Failed to delete %s. Reason: %s' % (file_path, e))
 
+def normalize_uv(uv):
+    uv -= torch.min(uv.reshape(-1, 2), dim=0)[0].detach()
+    uv /= torch.max(torch.linalg.norm(uv.reshape(-1, 2), dim=1)).detach()
+
 def fix_orientation(vertices, faces):
     from igl import bfs_orient
     new_faces, c = bfs_orient(faces)
@@ -39,6 +43,40 @@ def signed_volume(v, f):
     # Triple scalar product
     volume = 1/6 * np.sum(np.sum(fvectors[:,0,:] * np.cross(fvectors[:,1,:], fvectors[:,2,:], axis=1), axis=1))
     return volume
+
+## ===== Triangle Intersection Checks (Pytorch) =====
+# check that all points of the other triangle are on the same side of the triangle after mapping to barycentric coordinates.
+# returns true if all points are outside on the same side
+def intersectionloss(points, checktri):
+    """
+        points: B x 3 x 2 points to check
+        checktri: B x N x 3 x 2 triangles to check against (each set in points checks against N triangles)
+    """
+    points = points.unsqueeze(1)
+    d2 = points - checktri[:, :, [2], :] # B x N x 3 x 2
+    dX21 = checktri[:, :, 2, 0] - checktri[:, :, 1, 0] # B x N
+    dY12 = checktri[:, :, 1, 1] - checktri[:, :, 2, 1] # B x N
+    D = dY12 * (checktri[:, :, 0, 0] - checktri[:, :, 2, 0]) + dX21 * (checktri[:, :, 0, 1] - checktri[:, :, 2, 1]) # B x N
+    S = dY12 * d2[:, :, :, 0] + dX21 * d2[:, :, :, 1] # B x N x 3
+    T = (checktri[:, :, 2, 1] - checktri[:, :, 0, 1]) * d2[:, :, :, 0] + (checktri[:, :, 0, 0] - checktri[:, :, 2, 0]) * d2[:, :, :, 1] # B x N x 3
+
+    Dsign = torch.sign(D)
+    Scheck = Dsign * S
+    Tcheck = Dsign * T
+    STcheck = Dsign * (S + T)
+
+    # In loss form: we can sum over the violation of the inequalities
+    # Standard check: Scheck <= 0 or Tcheck <= 0 or STcheck >= D => all points are outside
+    # Loss form: mask * (torch.max(0, Scheck) + torch.max(0, Tcheck) + torch.max(0, D - STcheck))
+    #   where mask is 1 if all equalities are violated (so intersection is true)
+    intersections = ~(torch.all(Scheck <= 0, dim= 2) | torch.all(Tcheck <= 0, dim= 2) | torch.all(STcheck >= D, dim=2)) # B
+    print(intersections)
+    intersectionloss = intersections * (torch.max(torch.zeros_like(Scheck), Scheck) + torch.max(torch.zeros_like(Tcheck), Tcheck) +
+                                        torch.max(torch.zeros_like(D), D - STcheck)) # B x N x 3
+
+    return intersectionloss
+
+## ==============================================
 
 # Pytorch: from UVs back out Jacobian matrices per face using local coordinates per triangle
 # NOTE: uvtri input must be PER triangle
@@ -70,7 +108,7 @@ def tutte_embedding(vertices, faces):
     ## Harmonic parametrization for the internal vertices
     assert not np.isnan(bnd).any(), f"NaN found in boundary loop!"
     assert not np.isnan(bnd_uv).any(), f"NaN found in tutte initialized UVs!"
-    uv_init = igl.harmonic_weights(vertices, faces, bnd, np.array(bnd_uv, dtype=vertices.dtype), 1)
+    uv_init = igl.harmonic(vertices, faces, bnd, np.array(bnd_uv, dtype=vertices.dtype), 1)
 
     return uv_init
 
@@ -753,15 +791,49 @@ def generate_boundary_cut(mesh, max_cuts=10, verbose=False):
     import numpy as np
 
     cutvs = []
-    assert len(mesh.topology.boundaries) > 0, f"Mesh has no boundaries!"
+    # If mesh has no boundaries, then we create one at random
+    if len(mesh.topology.boundaries) == 0:
+        print(f"Mesh has no boundaries! Creating one at random.")
+        edgei = np.random.randint(0, len(mesh.topology.edges))
+        edge = mesh.topology.edges[edgei]
 
-    # Choose random boundary and vertex on boundary
-    bdi = np.random.randint(0, len(mesh.topology.boundaries))
-    bd = mesh.topology.boundaries[bdi]
-    bdvs = list(bd.adjacentVertices())
-    startvi = np.random.randint(0, len(bdvs))
-    startv = bdvs[startvi]
-    cutvs = [startv.index]
+        e2_candidates = [e.index for e in edge.halfedge.vertex.adjacentEdges() if not e.onBoundary() and e != edge]
+        if len(e2_candidates) == 0:
+            raise ValueError("Mesh has no valid edges to create boundary!")
+        else:
+            e2_i = np.random.choice(e2_candidates)
+
+        # Sourcev is shared vertex between the two edges
+        presourcev = edge.halfedge.twin.vertex
+        sourcev = edge.halfedge.vertex
+        otheredge = mesh.topology.edges[e2_i]
+        targetv = otheredge.halfedge.vertex
+        if sourcev not in mesh.topology.edges[e2_i].two_vertices():
+            sourcev = edge.halfedge.twin.vertex
+            presourcev = edge.halfedge.vertex
+        if targetv in edge.two_vertices():
+            targetv = otheredge.halfedge.twin.vertex
+        assert sourcev in mesh.topology.edges[e2_i].two_vertices()
+        assert presourcev not in mesh.topology.edges[e2_i].two_vertices()
+        assert targetv not in edge.two_vertices()
+        sourcev = sourcev.index
+        targetv = targetv.index
+        presourcev = presourcev.index
+
+        cutvs.extend([presourcev, sourcev, targetv])
+        # EdgeCut(mesh, edgei, sourcev, cutbdry=True, e2_i=e2_i).apply()
+
+        startvi = targetv
+        startv = mesh.topology.vertices[startvi]
+    else:
+        # assert len(mesh.topology.boundaries) > 0, f"Mesh has no boundaries!"
+        # Choose random boundary and vertex on boundary
+        bdi = np.random.randint(0, len(mesh.topology.boundaries))
+        bd = mesh.topology.boundaries[bdi]
+        bdvs = list(bd.adjacentVertices())
+        startvi = np.random.randint(0, len(bdvs))
+        startv = bdvs[startvi]
+        cutvs = [startv.index]
 
     rng = np.random.default_rng()
     for i in range(max_cuts):

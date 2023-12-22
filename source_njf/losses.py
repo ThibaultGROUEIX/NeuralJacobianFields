@@ -65,14 +65,24 @@ class UVLoss:
         self.count = 0
 
     def computeloss(self, vertices = None, faces = None, uv = None, jacobians = None, initjacobs=None, seplossdelta=0.1,
-                    weights = None, stitchweights = None, source = None, keepidxs = None):
-        loss = 0
+                    weights = None, stitchweights = None, source = None, keepidxs = None, mesh = None,
+                    predj = None):
+        loss = torch.tensor([0.], device=self.device).double()
         # Ground truth
         if self.args.gtuvloss:
-            # TODO: DOUBLE CHECK THAT VERTEX ORDER WITHIN FACES IS CORRECT OTHERWISE THIS MISMATCHES
+            # NOTE: DOUBLE CHECK THAT VERTEX ORDER WITHIN FACES IS CORRECT OTHERWISE THIS MISMATCHES
             gtuvloss = torch.nn.functional.mse_loss(uv.reshape(-1, 2), source.get_loaded_data('gt_uvs'), reduction='none')
-            loss += torch.sum(gtuvloss)
-            self.currentloss[self.count]['gtuvloss'] = np.mean(gtuvloss.detach().cpu().numpy(), axis=1)
+            loss += torch.mean(torch.sum(gtuvloss, axis=1))
+            self.currentloss[self.count]['gtuvloss'] = np.sum(gtuvloss.detach().cpu().numpy(), axis=1)
+
+        # Network ground truth
+        if self.args.gtnetworkloss:
+            gtjloss = torch.nn.functional.mse_loss(predj.squeeze()[:,:2,:], source.get_loaded_data('gt_jacobians'), reduction='none') # F x 3 x 2
+            gtweightloss = torch.nn.functional.mse_loss(weights, source.get_loaded_data('gt_weights'), reduction='none') # E
+            loss += torch.mean(torch.sum(gtjloss, axis=[1,2]))
+            loss += torch.mean(gtweightloss)
+            self.currentloss[self.count]['gtjloss'] = np.sum(np.sum(gtjloss.detach().cpu().numpy(), axis=1), axis=1)
+            self.currentloss[self.count]['gtweightloss'] = gtweightloss.detach().cpu().numpy()
 
         # Shrinking penalty
         if self.args.invjloss:
@@ -81,6 +91,73 @@ class UVLoss:
             invjloss = torch.sqrt(torch.tensor(2))/(jnorm.squeeze() + 1e-5)
             loss += torch.mean(invjloss)
             self.currentloss[self.count]['invjloss'] = invjloss.detach().cpu().numpy()
+
+        # Intersetion loss
+        if self.args.intersectionloss:
+            assert mesh is not None, f"Must provide mesh to compute intersection loss!"
+
+            # Need to construct point/triangle arrays for 3 cases
+            # (1) triangles with 3 neighbors (N = 3)
+            # (2) triangles with 2 neighbors (N = 2)
+            # (3) triangles with 1 neighbor (N = 1)
+            pointsn3 = []
+            trisn3 = []
+            ordern3 = []
+
+            pointsn2 = []
+            trisn2 = []
+            ordern2 = []
+
+            pointsn1 = []
+            trisn1 = []
+            ordern1 = []
+
+            for fi in range(len(mesh.faces)):
+                # Get neighbors
+                face = mesh.topology.faces[fi]
+                neighborfis = [f.index for f in face.adjacentFaces()]
+
+                if len(neighborfis) == 3:
+                    pointsn3.append(uv[fi])
+                    trisn3.append(uv[neighborfis])
+                    ordern3.append(fi)
+                elif len(neighborfis) == 2:
+                    pointsn2.append(uv[fi])
+                    trisn2.append(uv[neighborfis])
+                    ordern2.append(fi)
+                elif len(neighborfis) == 1:
+                    pointsn1.append(uv[fi])
+                    trisn1.append(uv[neighborfis])
+                    ordern1.append(fi)
+
+            # Convert to tensors
+            ordered_isect = np.zeros(len(mesh.faces))
+            isectloss = []
+            if len(pointsn3) > 0:
+                pointsn3 = torch.stack(pointsn3)
+                trisn3 = torch.stack(trisn3)
+                isectloss3 = intersectionloss(pointsn3, trisn3) # F1 x 3 x 3
+                isectloss.append(torch.sum(isectloss3, dim=[1,2]))
+                ordered_isect[ordern3] = isectloss[-1].detach().cpu().numpy()
+            if len(pointsn2) > 0:
+                pointsn2 = torch.stack(pointsn2)
+                trisn2 = torch.stack(trisn2)
+                isectloss2 = intersectionloss(pointsn2, trisn2) # F2 x 2 x 3
+                isectloss.append(torch.sum(isectloss2, dim=[1,2]))
+                ordered_isect[ordern2] = isectloss[-1].detach().cpu().numpy()
+            if len(pointsn1) > 0:
+                pointsn1 = torch.stack(pointsn1)
+                trisn1 = torch.stack(trisn1)
+                isectloss1 = intersectionloss(pointsn1, trisn1) # F3 x 1 x 3
+                isectloss.append(torch.sum(isectloss1, dim=[1,2]))
+                ordered_isect[ordern1] = isectloss[-1].detach().cpu().numpy()
+
+            # TODO: track correspondence to tris and visualize somehow???
+            isectloss = torch.cat(isectloss, dim=0) # F
+            assert len(isectloss) == len(mesh.faces), f"Intersection loss length mismatch: {len(isectloss)} vs. faces: {len(mesh.faces)}"
+
+            loss += self.args.intersectionloss_weight * torch.mean(isectloss)
+            self.currentloss[self.count]['intersectionloss'] = ordered_isect
 
         # Autocuts
         # if self.args.lossautocut:
@@ -379,6 +456,56 @@ def edgedistortion(vs, fs, uv):
     energy = torch.sum(energy, dim=1)
 
     return energy
+
+## ===== Triangle Intersection Checks (Pytorch) =====
+# check that all points of the other triangle are on the same side of the triangle after mapping to barycentric coordinates.
+# returns true if all points are outside on the same side
+def intersectionloss(points, checktri):
+    """
+        points: B x 3 x 2 points to check
+        checktri: B x N x 3 x 2 triangles to check against (each set in points checks against N triangles)
+    """
+    points = points.unsqueeze(1)
+    d2 = points - checktri[:, :, [2], :] # B x N x 3 x 2
+    dX21 = checktri[:, :, 2, 0] - checktri[:, :, 1, 0] # B x N
+    dY12 = checktri[:, :, 1, 1] - checktri[:, :, 2, 1] # B x N
+    D = dY12 * (checktri[:, :, 0, 0] - checktri[:, :, 2, 0]) + dX21 * (checktri[:, :, 0, 1] - checktri[:, :, 2, 1]) # B x N
+    S = dY12.unsqueeze(-1) * d2[:, :, :, 0] + dX21.unsqueeze(-1) * d2[:, :, :, 1] # B x N x 3
+    T = (checktri[:, :, 2, 1] - checktri[:, :, 0, 1]).unsqueeze(-1) * d2[:, :, :, 0] + (checktri[:, :, 0, 0] - checktri[:, :, 2, 0]).unsqueeze(-1) * d2[:, :, :, 1] # B x N x 3
+
+    Dsign = torch.sign(D).unsqueeze(-1)
+    Scheck = Dsign * S
+    Tcheck = Dsign * T
+    STcheck = Dsign * (S + T)
+
+    # In loss form: we can sum over the violation of the inequalities
+    # Standard check: Scheck <= 0 or Tcheck <= 0 or STcheck >= D => all points are outside
+    # Loss form: mask * (torch.max(0, Scheck) + torch.max(0, Tcheck) + torch.max(0, D - STcheck))
+    #   where mask is 1 if all equalities are violated (so intersection is true)
+    intersections = ~(torch.all(Scheck <= torch.zeros_like(Scheck), dim= 2) | torch.all(Tcheck <= torch.zeros_like(Tcheck), dim= 2) | torch.all(STcheck >= D.unsqueeze(-1), dim=2)).unsqueeze(-1) # B x N
+    intersectionloss = intersections * (torch.max(torch.zeros_like(Scheck), Scheck) + torch.max(torch.zeros_like(Tcheck), Tcheck) + torch.max(torch.zeros_like(STcheck), D.unsqueeze(-1) - STcheck)) # B x N x 3
+
+    return intersectionloss
+
+# Minimal implementation (without batching)
+def sameside(points, checktri):
+    """
+        points: 3 x 2 points to check
+        checktri: 3 x 2 triangle to check against
+    """
+    d2 = points - checktri[[2], :] # 3 x 2
+    dX21 = checktri[2, 0] - checktri[1, 0]
+    dY12 = checktri[1, 1] - checktri[2, 1]
+    D = dY12 * (checktri[0, 0] - checktri[2, 0]) + dX21 * (checktri[0, 1] - checktri[2, 1])
+    S = dY12 * d2[:, 0] + dX21 * d2[:, 1] # 3
+    T = (checktri[2, 1] - checktri[0, 1]) * d2[:, 0] + (checktri[0, 0] - checktri[2, 0]) * d2[:, 1]
+
+    if D < 0:
+        sameside = torch.all(S >= 0) | torch.all(T >= 0) | torch.all(S + T <= D)
+    else:
+        sameside = torch.all(S <= 0) | torch.all(T <= 0) | torch.all(S + T >= D)
+
+    return sameside
 
 # ==================== Stitching Energies ===============================
 def stitchingloss(vs, fs, uv, losstypes, args, stitchweights=None, source = None, keepidxs = None):

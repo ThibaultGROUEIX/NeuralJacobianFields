@@ -319,7 +319,7 @@ class MeshProcessor:
 
 
     def sample_points(self, n):
-        bary, found_faces = igl.random_points_on_mesh(n, self.vertices, self.faces)
+        bary, found_faces, sampled_points = igl.random_points_on_mesh(n, self.vertices, self.faces)
         vert_ind =  self.faces[found_faces]
         point_samples =  self.vertices[vert_ind[:,0]] * bary[:,0:1] + self.vertices[vert_ind[:,1]] * bary[:,1:2] + self.vertices[vert_ind[:,2]] * bary[:,2:3]
         normal_samples = self.normals[vert_ind[:,0]] * bary[:,0:1] + self.normals[vert_ind[:,1]] * bary[:,1:2] + self.normals[vert_ind[:,2]] * bary[:,2:3]

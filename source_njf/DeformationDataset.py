@@ -64,24 +64,48 @@ class DeformationDataset(Dataset):
             chunks = np.split(ts, np.arange(args.targets_per_batch,len(ts),args.targets_per_batch))
             if args.ninit > 0:
                 for _ in range(args.ninit):
-                    for _ in range(batchgrads):
-                        for chunk in chunks:
-                            self.source_and_target.append((s,chunk))
-            else:
-                for _ in range(batchgrads):
                     for chunk in chunks:
                         self.source_and_target.append((s,chunk))
+            else:
+                for chunk in chunks:
+                    self.source_and_target.append((s,chunk))
+
+        # HACK: rewrite self.directory to be a list and reassign just in case source/target indices are in subfolders
+        self.args = args
+        self.directory = self.args.root_dir_train if self.train else self.args.root_dir_test
+        self.directory = "" if self.directory is None else self.directory
+
+        directories = []
+        for ind, (source_index, target_index) in enumerate(self.source_and_target):
+            objpath = join(self.directory, source_index)
+            directory_name, basename = os.path.split(objpath)
+            source_index = basename
+            self.source_and_target[ind] = (source_index, source_index)
+            directories.append(directory_name)
+        self.directory = directories
 
         self.source_keys = source_keys
         self.s_and_t = s_and_t
         self.target_keys = target_keys
-        self.args = args
-        self.directory = self.args.root_dir_train if self.train else self.args.root_dir_test
-        self.directory = "" if self.directory is None else self.directory
         self.source = None
         self.target = None
         self.star_is_initialized = False
         self.weightsdim = 0
+
+        # HACK: Clear cache if args is set
+        if self.args.overwritecache:
+            from utils import clear_directory
+
+            for ind, (source_index, target_index) in enumerate(self.source_and_target):
+                source_parent = Path(join(self.directory[ind], source_index)).parent
+                target_parent = Path(join(self.directory[ind], target_index[0])).parent
+
+                traincache = join(source_parent, "cache")
+                targetcache = join(target_parent, "cache")
+                if os.path.exists(traincache):
+                    clear_directory(traincache)
+                if os.path.exists(targetcache):
+                    clear_directory(targetcache)
 
         # Store point dimension
         # if args.layer_normalization == "FLATTEN":
@@ -162,11 +186,12 @@ class DeformationDataset(Dataset):
             # make a symbolic link
         return points_s.cpu().numpy(), np.expand_dims(self.human_db_list[dataset_choice].faces, 0), dataset_choice,gender_s,pose_s,shape_s,trans_s
 
-    def get_item_default(self,ind, verbose=False):
+    def get_item_default(self,ind):
         source = None
         target = None
         # Single source single target
         source_index ,target_index = self.source_and_target[ind]
+        directory = self.directory[ind]
 
         # NOTE: HACK
         if self.args.accumulate_grad_batches > 1:
@@ -175,12 +200,12 @@ class DeformationDataset(Dataset):
         for i,target in enumerate(target_index):
             if Path(target).suffix in [ '.obj' , '.off', '.ply']:
                 # NOTE: Below caches the vertices/faces + creates the directory
-                self.obj_to_npy(Path(join(self.directory, target)), ind)
+                self.obj_to_npy(Path(join(directory, target)), ind)
                 target_index[i] = target[:-4]
 
         if Path(source_index).suffix  in [ '.obj' , '.off', '.ply']:
             # NOTE: Below caches the vertices/faces + creates the directory
-            self.obj_to_npy(Path(join(self.directory, source_index)), ind)
+            self.obj_to_npy(Path(join(directory, source_index)), ind)
             source_index = source_index[:-4]
 
         # print(source_index, target_index)
@@ -191,11 +216,16 @@ class DeformationDataset(Dataset):
         if self.source is not None and self.unique_source:
             source = self.source
         else:
-            source = SourceMesh(self.args, source_index, join(self.directory, 'cache', f"{source_index}_{ind}"), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
+            source = SourceMesh(self.args, source_index, join(directory, 'cache', f"{source_index}_{ind}"), self.source_keys, scales[True], self.ttype, use_wks = not self.args.no_wks,
                                 random_centering=(self.train and self.args.random_centering),  cpuonly=self.cpuonly, init=self.args.init,
                                 initjinput = self.args.initjinput, fft=self.args.fft, fftscale=self.args.fftscale,
                                 flatten=self.args.dense, debug=self.args.debug, top_k_eig=self.args.top_k_eig)
             new_init = None
+
+            # HACK: this only works on initialization if we have self.unique_source!
+            if self.args.initrot:
+                new_init = True
+
             if self.args.ninit == -1:
                 if not self.args.basistype:
                     new_init = True
@@ -206,7 +236,8 @@ class DeformationDataset(Dataset):
 
         # ==================================================================
         # LOAD TARGET
-        target = BatchOfTargets(target_index, [join(self.directory, 'cache', f"{target_index[i]}_{ind}") for i in range(len(target_index))], self.target_keys, scales[False], self.ttype,
+        # HACK: we just set the targets to be exactly same directory as source
+        target = BatchOfTargets(source_index, [join(directory, 'cache', f"{source_index}_{ind}") for i in range(len(target_index))], self.target_keys, scales[False], self.ttype,
                                 sparse = self.args.sparsepoisson)
         target.load()
         return source, target

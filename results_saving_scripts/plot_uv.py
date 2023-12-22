@@ -10,7 +10,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
             stitchweight=0.1, dmin=0, dmax=1,
             facecolors = None, edges = None, edgecolors = None, source = None, valid_edges_to_soup = None,
             cmap = plt.get_cmap("tab20"), edge_cmap=plt.get_cmap("gist_rainbow"), edgecorrespondences=None,
-            keepidxs=None,
+            keepidxs=None, edge_vpairs = None, ewidth = 1, suptitle=None,
             ):
     """ edges: E x 2 x 2 array of individiual node positions
         edgecolors: [0-1] values to query edge_cmap """
@@ -116,18 +116,23 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                 elif key == "edgecutloss":
                     from collections import defaultdict
 
-                    if source is None:
-                        print(f"Need to pass in source mesh to plot {key}")
+                    if source is None and edge_vpairs is None:
+                        print(f"Need to pass in source mesh or edge_vpairs to plot {key}")
                         continue
 
                     edgecutloss = val # E x 1
-                    edge_vpairs = source.edge_vpairs
+                    if edge_vpairs is None:
+                        edge_vpairs = source.edge_vpairs
                     if keepidxs is not None:
                         edge_vpairs = edge_vpairs[keepidxs]
                     assert len(edgecutloss) == len(edge_vpairs), f"len(edgecutloss) {len(edgecutloss)} != len(edge_vpairs) {len(edge_vpairs)}"
 
                     fig, axs = plt.subplots(figsize=(5,5))
-                    fig.suptitle(f"Total Edge Cut Loss: {np.sum(edgecutloss):0.8f}")
+
+                    if suptitle:
+                        fig.suptitle(f"{suptitle}\nTotal Edge Cut Loss: {np.sum(edgecutloss):0.8f}. ")
+                    else:
+                        fig.suptitle(f"Total Edge Cut Loss: {np.sum(edgecutloss):0.8f}. ")
 
                     cmap = plt.get_cmap("Reds")
                     norm = mpl.colors.Normalize(vmin=0, vmax=stitchweight)
@@ -138,17 +143,17 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     axs.tripcolor(tris, facecolors=facecolors, cmap=facecmap,
                                     linewidth=0.5, edgecolor='black')
 
-                    # Plot edges if given
+                    # Plot edges with coloring
                     for i in range(len(edgecutloss)):
                         edgeval = edgecutloss[i]
                         uv0 = pred_vertices[edge_vpairs[i][:,0]]
                         uv1 = pred_vertices[edge_vpairs[i][:,1]]
 
                         axs.plot(uv0[:, 0], uv0[:, 1], marker='none', linestyle='-',
-                                    color=scalarmap.to_rgba(edgeval)[:3], linewidth=1.5)
+                                    color=scalarmap.to_rgba(edgeval)[:3], linewidth= ewidth)
 
                         axs.plot(uv1[:, 0], uv1[:, 1], marker='none', linestyle='-',
-                                    color=scalarmap.to_rgba(edgeval)[:3], linewidth=1.5)
+                                    color=scalarmap.to_rgba(edgeval)[:3], linewidth= ewidth)
 
                     plt.axis('off')
                     axs.axis("equal")
@@ -201,7 +206,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                                 linewidth=0.1, vmin=dmin, vmax=dmax, edgecolor="black")
 
                     # Plot edges if given
-                    if edges is not None or len(edges) > 0:
+                    if edges is not None and len(edges) > 0:
                         for i, e in enumerate(edges):
                             axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
                                     color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
@@ -218,7 +223,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                                 linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
 
                     # Plot edges if given
-                    if edges is not None or len(edges) > 0:
+                    if edges is not None and len(edges) > 0:
                         for i, e in enumerate(edges):
                             axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
                                     color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
@@ -235,7 +240,24 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                                 linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
 
                     # Plot edges if given
-                    if edges is not None or len(edges) > 0:
+                    if edges is not None and len(edges) > 0:
+                        for i, e in enumerate(edges):
+                            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                                    color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
+                    plt.axis('off')
+                    axs.axis("equal")
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight',dpi=600)
+                    plt.close()
+                elif key == "intersectionloss":
+                    fig, axs = plt.subplots(figsize=(5,5))
+                    fig.suptitle(f"{name}\nAvg {key}: {np.mean(val):0.4f}")
+                    cmap = plt.get_cmap("Reds")
+                    axs.tripcolor(tris, val[:len(triangles)], facecolors=val[:len(triangles)], cmap=cmap,
+                                linewidth=0.1, vmin=cmin, vmax=cmax, edgecolor="black")
+
+                    # Plot edges if given
+                    if edges is not None and len(edges) > 0:
                         for i, e in enumerate(edges):
                             axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
                                     color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
@@ -246,7 +268,7 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                     plt.close()
                 elif key == "gtuvloss":
                     fig, axs = plt.subplots(figsize=(5,5))
-                    fig.suptitle(f"Total GT Loss: {np.sum(val):0.8f}")
+                    fig.suptitle(f"Average GT Loss: {np.mean(val):0.8f}")
                     cmap = plt.get_cmap("Reds")
 
                     axs.tripcolor(tris, val, cmap=cmap,
@@ -257,6 +279,67 @@ def plot_uv(path, name, pred_vertices, triangles, gt_vertices=None, losses=None,
                         for i, e in enumerate(edges):
                             axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
                                         color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
+                    plt.axis('off')
+                    axs.axis("equal")
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight', dpi=600)
+                    plt.close()
+                elif key == "gtjloss":
+                    fig, axs = plt.subplots(figsize=(5,5))
+                    fig.suptitle(f"Average GT Jacobian Loss: {np.mean(val):0.8f}")
+                    cmap = plt.get_cmap("Reds")
+
+                    axs.tripcolor(tris, val, cmap=cmap,
+                                linewidth=0.1, vmin=0, vmax=1, edgecolor='black')
+
+                    # Plot edges if given
+                    if edges is not None and len(edges) > 0:
+                        for i, e in enumerate(edges):
+                            axs.plot(e[:, 0], e[:, 1], marker='none', linestyle='-',
+                                        color=edge_cmap(edgecolors[i]) if edgecolors is not None else "black", linewidth=1.5)
+
+                    plt.axis('off')
+                    axs.axis("equal")
+                    plt.savefig(os.path.join(path, f"{key}_{fname}.png"), bbox_inches='tight', dpi=600)
+                    plt.close()
+                elif key == "gtweightloss":
+                    fig, axs = plt.subplots(figsize=(5,5))
+                    fig.suptitle(f"Average GT Weights Loss: {np.mean(val):0.8f}")
+                    cmap = plt.get_cmap("Reds")
+
+                    if source is None and edge_vpairs is None:
+                        print(f"Need to pass in source mesh or edge_vpairs to plot {key}")
+                        continue
+
+                    gtweightloss = val # E x 1
+                    if edge_vpairs is None:
+                        edge_vpairs = source.edge_vpairs
+                    if keepidxs is not None:
+                        edge_vpairs = edge_vpairs[keepidxs]
+                    assert len(gtweightloss) == len(edge_vpairs), f"len(gtweightloss) {len(gtweightloss)} != len(edge_vpairs) {len(edge_vpairs)}"
+
+                    fig, axs = plt.subplots(figsize=(5,5))
+
+                    cmap = plt.get_cmap("Reds")
+                    norm = mpl.colors.Normalize(vmin=0, vmax=1)
+                    scalarmap = cm.ScalarMappable(norm=norm, cmap=cmap)
+
+                    # Plot color-coded triangles and color the edges based on losses
+                    facecmap = plt.get_cmap("tab20")
+                    axs.tripcolor(tris, facecolors=facecolors, cmap=facecmap,
+                                    linewidth=0.5, edgecolor='black')
+
+                    # Plot edges with coloring
+                    for i in range(len(gtweightloss)):
+                        edgeval = gtweightloss[i]
+                        uv0 = pred_vertices[edge_vpairs[i][:,0]]
+                        uv1 = pred_vertices[edge_vpairs[i][:,1]]
+
+                        axs.plot(uv0[:, 0], uv0[:, 1], marker='none', linestyle='-',
+                                    color=scalarmap.to_rgba(edgeval)[:3], linewidth= ewidth)
+
+                        axs.plot(uv1[:, 0], uv1[:, 1], marker='none', linestyle='-',
+                                    color=scalarmap.to_rgba(edgeval)[:3], linewidth= ewidth)
 
                     plt.axis('off')
                     axs.axis("equal")

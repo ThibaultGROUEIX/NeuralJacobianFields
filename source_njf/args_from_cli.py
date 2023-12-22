@@ -39,7 +39,7 @@ def get_arg_parser():
 	parser.add_argument('--arch', type=str, choices={'diffusionnet', 'meshcnn', 'mlp'}, help="architecture to use", default='mlp')
 	parser.add_argument('--softpoisson', type=str, choices={'edges', 'valid'}, help="SOFT POISSON", default=None)
 	parser.add_argument('--sparsepoisson', action="store_true")
-	parser.add_argument("--spweight", choices={'sigmoid', 'seamless', 'cosine', 'softmax'}, type=str,
+	parser.add_argument("--spweight", choices={"nonzero", 'sigmoid', 'seamless', 'cosine', 'softmax'}, type=str,
 						help = "how to map dot product to soft poisson weights", default='sigmoid')
 	parser.add_argument("--softmax", help="softmax the predicted weights",action="store_true")
 	parser.add_argument("--fft", type=int,
@@ -69,8 +69,9 @@ def get_arg_parser():
 	parser.add_argument("--identity", help='initialize network from identity', action="store_true")
 	parser.add_argument("--globaltrans", help='also predict global translation per shape code', action="store_true")
 	parser.add_argument("--slimiters", type=int, default=500, help="number of iterations to optimize SLIM")
-	parser.add_argument("--init", choices={"tutte", "isometric", "slim"}, help="initialize 2D embedding", default=None, type=str)
+	parser.add_argument("--init", choices={"tutte", "isometric", "slim", "precut"}, help="initialize 2D embedding", default=None, type=str)
 	parser.add_argument("--ninit", type=int, default=1, help="re-initialize this mesh n many times. only valid for isometric initialization. -1 indicates new initialization for EACH load")
+	parser.add_argument("--initrot", action='store_true', help="initialize with random rotation (isometric only)")
 	parser.add_argument("--basistype", choices={"basis", "rot", "global"}, help="how to sample new triangle local basis", default=None, type=str)
 	parser.add_argument("--initjinput", help="use the initialization jacobian as part of input",
 							action="store_true")
@@ -99,6 +100,8 @@ def get_arg_parser():
 	parser.add_argument("--align_2D",
 						help='If specified, align target and source using procrustes over xy axis', action="store_true")
 	parser.add_argument("--data_file",help='if specified, use given path to load json file holding all pairs (relative to data dir''s location)',
+						type = str,default="data.json")
+	parser.add_argument("--test_file",help='relative json to root_dir_test',
 						type = str,default="data.json")
 	parser.add_argument("--only_numbers",
 						help='if specified, look for directories that are just number files',
@@ -141,6 +144,7 @@ def get_arg_parser():
 	parser.add_argument("--ignorei", help = "cone cutting experiment", default=0,
 						type = int)
 	parser.add_argument("--gtuvloss", help="use ground truth uv supervision", action="store_true")
+	parser.add_argument("--gtnetworkloss", help="use ground truth j and weights", action="store_true")
 	parser.add_argument("--gtjloss", help="ground truth jacobian loss", action="store_true")
 	parser.add_argument("--removecutfromloss", action="store_true")
 
@@ -148,7 +152,7 @@ def get_arg_parser():
 	parser.add_argument("--seamlessvertexsep", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--seamlessedgecut", help = "use counting loss over distortion energy", action="store_true")
 	parser.add_argument("--seamlessgradloss", help = "use counting loss over distortion energy", action="store_true")
-	parser.add_argument("--seamlessdelta", help="initial delta for edge separation loss", default=0.0005, type=float)
+	parser.add_argument("--seamlessdelta", help="initial delta for edge separation loss", default=0.005, type=float)
 
 	# Weights
 	parser.add_argument("--stitchschedule", help = "apply linear schedule on stitching loss", type=str,
@@ -177,6 +181,10 @@ def get_arg_parser():
 	parser.add_argument("--losscount", help = "counting loss", action="store_true")
 	parser.add_argument("--arapnorm", help = "normalize arap using avg edge len", action="store_true")
 
+	# Intersection loss
+	parser.add_argument("--intersectionloss", help = "adjacent triangle intersection loss", action="store_true")
+	parser.add_argument("--intersectionloss_weight", type=float, help = "weight on isectloss", default = 1)
+
 	## ELSE
 	parser.add_argument("--lossgradientstitching", choices={'cosine', 'split', 'l2', 'l1'}, help = "use gradient stitching loss", default=None)
 
@@ -195,6 +203,11 @@ def get_arg_parser():
 	parser.add_argument("--seploss_schedule", help="apply linear schedule to the separation loss delta parameter", action="store_true")
 	parser.add_argument("--lossautocut", help = "use counting loss over distortion energy", action="store_true")
 	######
+
+ 	### SDS
+	parser.add_argument('--sdsloss', type=str, choices={"text2img", "img2img"}, default=None)
+	parser.add_argument('--textureimg', type=str, help="path to texture image", default=None)
+	parser.add_argument('--texturetext', nargs="+", type=str, help="text description", default=None)
 
 	parser.add_argument("--gpu_strategy",help ="default: no op (whatever lightning does by default). ddp: use the ddp multigpu startegy; spawn: use the ddpspawn strategy",default=None,choices={'ddp','ddpspawn', 'cpuonly'})
 	parser.add_argument("--no_validation",help = "skip validation",action="store_true")

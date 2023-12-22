@@ -14,6 +14,7 @@ import random
 import time
 from diffusionnet import get_operators
 from utils import FourierFeatureTransform, get_jacobian_torch
+import dill as pickle
 
 class SourceMesh:
     '''
@@ -177,13 +178,32 @@ class SourceMesh:
 
         self.poisson = self.mesh_processor.diff_ops.poisson_solver
 
-        ### Load ground truth jacobians if set
+        ### Load ground truth UVs if set
         if self.args.gtuvloss:
             self.gt_uvs = torch.load(os.path.join(self.source_dir, "..", "..", "gt_uvs.pt"))
+            # Center the UVs
+            self.gt_uvs -= torch.mean(self.gt_uvs, dim=0, keepdim=True)
             self.__loaded_data['gt_uvs'] = self.gt_uvs
 
+            # Debugging: plot the ground truth UVs!!
+            if self.args.debug:
+                from matplotlib.tri import Triangulation
+                import matplotlib.pyplot as plt
+
+                triangles = np.arange(len(self.gt_uvs)).reshape(-1, 3)
+                tris = Triangulation(self.gt_uvs[:, 0], self.gt_uvs[:, 1], triangles=triangles)
+                fig, axs = plt.subplots(figsize=(5, 5))
+                axs.set_title("Ground Truth UVs")
+                cmap = plt.get_cmap("tab20")
+                axs.tripcolor(tris, facecolors=np.ones(len(triangles)), cmap=cmap,
+                                    linewidth=0.1, edgecolor="black")
+                plt.axis('off')
+                axs.axis('equal')
+                plt.savefig("./scratch/gtuv.png")
+                plt.close(fig)
+                plt.cla()
+
         ## Precompute edge lengths and edgeidxs
-        # TODO: CACHE
         from source_njf.utils import get_edge_pairs, vertex_soup_correspondences, edge_soup_correspondences
         from itertools import combinations
 
@@ -192,82 +212,132 @@ class SourceMesh:
         self.cutfs = faces
         ogvs = vertices.detach().cpu().numpy()
         ogfs = faces
-
         mesh = Mesh(vertices.detach().cpu().numpy(), faces)
 
-        vcorrespondences = vertex_soup_correspondences(faces)
-        valid_pairs = []
-        for ogv, vlist in sorted(vcorrespondences.items()):
-            valid_pairs.extend(list(combinations(vlist, 2)))
-        self.valid_pairs = valid_pairs
+        if os.path.exists(os.path.join(self.source_dir, "edge_vpairs.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "facepairs_nobound.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "elens_nobound.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "ogedge_vpairs_nobound.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "valid_pairs.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "valid_edge_pairs.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "facepairs.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "allfacepairs.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "valid_elens.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "edges.pt")) and \
+            os.path.exists(os.path.join(self.source_dir, "edgecorrespondences.pkl")) and \
+            os.path.exists(os.path.join(self.source_dir, "meshe_to_vpair.pkl")) and \
+            os.path.exists(os.path.join(self.source_dir, "vpair_to_meshe.pkl")) and \
+            os.path.exists(os.path.join(self.source_dir, "meshe_to_meshenobound.pkl")):
 
-        # Get face pairs for all corresponding valid pairs
-        self.allfacepairs = []
-        for pair in valid_pairs:
-            self.allfacepairs.append([pair[0] // 3, pair[1] // 3])
+            self.edge_vpairs = torch.load(os.path.join(self.source_dir, "edge_vpairs.pt"))
+            self.facepairs_nobound = torch.load(os.path.join(self.source_dir, "facepairs_nobound.pt"))
+            self.elens_nobound = torch.load(os.path.join(self.source_dir, "elens_nobound.pt"))
+            self.ogedge_vpairs_nobound = torch.load(os.path.join(self.source_dir, "ogedge_vpairs_nobound.pt"))
+            self.valid_pairs = torch.load(os.path.join(self.source_dir, "valid_pairs.pt"))
+            self.valid_edge_pairs = torch.load(os.path.join(self.source_dir, "valid_edge_pairs.pt"))
+            self.facepairs = torch.load(os.path.join(self.source_dir, "facepairs.pt"))
+            self.allfacepairs = torch.load(os.path.join(self.source_dir, "allfacepairs.pt"))
+            self.valid_elens = torch.load(os.path.join(self.source_dir, "valid_elens.pt"))
+            self.edges = torch.load(os.path.join(self.source_dir, "edges.pt"))
 
-        # There should be no self-pairs
-        for pair in self.allfacepairs:
-            assert pair[0] != pair[1], f"Self-pair found: {pair}"
+            import dill as pickle
+            self.edgecorrespondences = pickle.load(open(os.path.join(self.source_dir, "edgecorrespondences.pkl"), "rb"))
+            self.meshe_to_vpair = pickle.load(open(os.path.join(self.source_dir, "meshe_to_vpair.pkl"), "rb"))
+            self.vpair_to_meshe = pickle.load(open(os.path.join(self.source_dir, "vpair_to_meshe.pkl"), "rb"))
+            self.meshe_to_meshenobound = pickle.load(open(os.path.join(self.source_dir, "meshe_to_meshenobound.pkl"), "rb"))
+        else:
+            print(f"Constructing all correspondence/topology variables ...")
+            vcorrespondences = vertex_soup_correspondences(faces)
+            valid_pairs = []
+            for ogv, vlist in sorted(vcorrespondences.items()):
+                valid_pairs.extend(list(combinations(vlist, 2)))
+            self.valid_pairs = valid_pairs
 
-        self.valid_edge_pairs, self.valid_edges_to_soup, self.edgeidxs, self.edgededupidxs, self.edges, self.valid_elens, self.facepairs = get_edge_pairs(mesh, valid_pairs, device=device)
+            # Get face pairs for all corresponding valid pairs
+            self.allfacepairs = []
+            for pair in valid_pairs:
+                self.allfacepairs.append([pair[0] // 3, pair[1] // 3])
 
-        # Convert edge pairs to tensor
-        self.valid_pairs = torch.tensor([list(pair) for pair in self.valid_pairs], device=device)
-        self.valid_edge_pairs = torch.tensor([list(pair) for pair in self.valid_edge_pairs], device=device)
-        self.facepairs = torch.tensor(self.facepairs, device=device)
-        self.allfacepairs = torch.tensor(self.allfacepairs, device=device)
-        self.valid_elens = self.valid_elens.to(device)
-        self.edges = np.array(self.edges)
+            # There should be no self-pairs
+            for pair in self.allfacepairs:
+                assert pair[0] != pair[1], f"Self-pair found: {pair}"
 
-        ### Edge correspondences
-        from source_njf.utils import meshe_to_vpair
-        self.edgecorrespondences, self.facecorrespondences = edge_soup_correspondences(ogfs)
-        self.meshe_to_vpair = meshe_to_vpair(mesh)
-        self.vpair_to_meshe = {v: k for k, v in self.meshe_to_vpair.items()} # Reverse for vpair to meshe lookup
+            self.valid_edge_pairs, self.valid_edges_to_soup, self.edgeidxs, self.edgededupidxs, self.edges, self.valid_elens, self.facepairs = get_edge_pairs(mesh, valid_pairs, device=device)
 
-        # Get corresponding edge lengths, og edge pairs, and face correspondences w/o boundary
-        elens_nobound = []
-        edge_vpairs = []
-        # NOTE: This maps eidx => new edge indexing with boundaries removed == self.initweights index!!!!
-        self.meshe_to_meshenobound = {}
+            # Convert edge pairs to tensor
+            self.valid_pairs = torch.tensor([list(pair) for pair in self.valid_pairs], device=device)
+            self.valid_edge_pairs = torch.tensor([list(pair) for pair in self.valid_edge_pairs], device=device)
+            self.facepairs = torch.tensor(self.facepairs, device=device)
+            self.allfacepairs = torch.tensor(self.allfacepairs, device=device)
+            self.valid_elens = self.valid_elens.to(device)
+            self.edges = np.array(self.edges)
 
-        self.ogedge_vpairs_nobound = []
-        self.facepairs_nobound = []
-        count = 0
-        for eidx, ogvpair in sorted(self.meshe_to_vpair.items()):
-            soupvpairs = self.edgecorrespondences[ogvpair]
-            fpair = self.facecorrespondences[ogvpair]
-            ogvpair = list(ogvpair)
+            ### Edge correspondences
+            from source_njf.utils import meshe_to_vpair
+            self.edgecorrespondences, self.facecorrespondences = edge_soup_correspondences(ogfs)
+            self.meshe_to_vpair = meshe_to_vpair(mesh)
+            self.vpair_to_meshe = {v: k for k, v in self.meshe_to_vpair.items()} # Reverse for vpair to meshe lookup
 
-            if len(soupvpairs) == 1:
-                continue
+            # Get corresponding edge lengths, og edge pairs, and face correspondences w/o boundary
+            elens_nobound = []
+            edge_vpairs = []
+            # NOTE: This maps eidx => new edge indexing with boundaries removed == self.initweights index!!!!
+            self.meshe_to_meshenobound = {}
 
-            elens_nobound.append(np.linalg.norm(ogvs[ogvpair[1]] - ogvs[ogvpair[0]]))
+            self.ogedge_vpairs_nobound = []
+            self.facepairs_nobound = []
+            count = 0
+            for eidx, ogvpair in sorted(self.meshe_to_vpair.items()):
+                soupvpairs = self.edgecorrespondences[ogvpair]
+                fpair = self.facecorrespondences[ogvpair]
+                ogvpair = list(ogvpair)
 
-            # Sanity check edge length
-            np.testing.assert_almost_equal(elens_nobound[-1], mesh.length(mesh.topology.edges[eidx]))
+                if len(soupvpairs) == 1:
+                    continue
 
-            edge_vpairs.append(soupvpairs)
-            self.meshe_to_meshenobound[eidx] = count
-            self.ogedge_vpairs_nobound.append(ogvpair)
+                elens_nobound.append(np.linalg.norm(ogvs[ogvpair[1]] - ogvs[ogvpair[0]]))
 
-            # Get face pair
-            assert len(fpair) == 2, f"Edge corresponding face pair {fpair} does not have 2 faces!"
-            self.facepairs_nobound.append(fpair)
+                # Sanity check edge length
+                np.testing.assert_almost_equal(elens_nobound[-1], mesh.length(mesh.topology.edges[eidx]))
 
-            count += 1
+                edge_vpairs.append(soupvpairs)
+                self.meshe_to_meshenobound[eidx] = count
+                self.ogedge_vpairs_nobound.append(ogvpair)
 
-        # NOTE: All are sorted by edges NOT on boundary!!
-        self.ogedge_vpairs_nobound = torch.tensor(self.ogedge_vpairs_nobound, device=device).long() # E x 2
-        self.elens_nobound = torch.tensor(elens_nobound, device=device)
-        self.facepairs_nobound = torch.tensor(self.facepairs_nobound, device=device).long()
+                # Get face pair
+                assert len(fpair) == 2, f"Edge corresponding face pair {fpair} does not have 2 faces!"
+                self.facepairs_nobound.append(fpair)
 
-        # NOTE: FIRST square dimension gives the corresponding vertices across the two soup edges
-        edge_vpairs = np.array(edge_vpairs).transpose(0,2,1) # E x 2 x 2 (edges x (edge 1 v1, edge 1 v2) x (edge 2 v1, edge 2 v2)
-        self.edge_vpairs = torch.from_numpy(edge_vpairs).to(device).long()
+                count += 1
 
-        assert len(self.edge_vpairs) == len(self.elens_nobound) == len(self.ogedge_vpairs_nobound) == len(self.facepairs_nobound), f"Edge pairs {len(self.edge_vpairs)}, edge lengths {len(self.elens_nobound)}, og edge pairs {len(self.ogedge_vpairs_nobound)}, and face pairs {len(self.facepairs_nobound)} do not have the same length!"
+            # NOTE: All are sorted by edges NOT on boundary!!
+            self.ogedge_vpairs_nobound = torch.tensor(self.ogedge_vpairs_nobound, device=device).long() # E x 2
+            self.elens_nobound = torch.tensor(elens_nobound, device=device)
+            self.facepairs_nobound = torch.tensor(self.facepairs_nobound, device=device).long()
+
+            # NOTE: FIRST square dimension gives the corresponding vertices across the two soup edges
+            edge_vpairs = np.array(edge_vpairs).transpose(0,2,1) # E x 2 x 2 (edges x (edge 1 v1, edge 1 v2) x (edge 2 v1, edge 2 v2)
+            self.edge_vpairs = torch.from_numpy(edge_vpairs).to(device).long()
+
+            assert len(self.edge_vpairs) == len(self.elens_nobound) == len(self.ogedge_vpairs_nobound) == len(self.facepairs_nobound), f"Edge pairs {len(self.edge_vpairs)}, edge lengths {len(self.elens_nobound)}, og edge pairs {len(self.ogedge_vpairs_nobound)}, and face pairs {len(self.facepairs_nobound)} do not have the same length!"
+
+            torch.save(self.edge_vpairs, os.path.join(self.source_dir, "edge_vpairs.pt"))
+            torch.save(self.facepairs_nobound, os.path.join(self.source_dir, "facepairs_nobound.pt"))
+            torch.save(self.elens_nobound, os.path.join(self.source_dir, "elens_nobound.pt"))
+            torch.save(self.ogedge_vpairs_nobound, os.path.join(self.source_dir, "ogedge_vpairs_nobound.pt"))
+            torch.save(self.valid_pairs, os.path.join(self.source_dir, "valid_pairs.pt"))
+            torch.save(self.valid_edge_pairs, os.path.join(self.source_dir, "valid_edge_pairs.pt"))
+            torch.save(self.facepairs, os.path.join(self.source_dir, "facepairs.pt"))
+            torch.save(self.allfacepairs, os.path.join(self.source_dir, "allfacepairs.pt"))
+            torch.save(self.valid_elens, os.path.join(self.source_dir, "valid_elens.pt"))
+            torch.save(self.edges, os.path.join(self.source_dir, "edges.pt"))
+
+            import dill as pickle
+            pickle.dump(self.edgecorrespondences, open(os.path.join(self.source_dir, "edgecorrespondences.pkl"), "wb"))
+            pickle.dump(self.meshe_to_vpair, open(os.path.join(self.source_dir, "meshe_to_vpair.pkl"), "wb"))
+            pickle.dump(self.vpair_to_meshe, open(os.path.join(self.source_dir, "vpair_to_meshe.pkl"), "wb"))
+            pickle.dump(self.meshe_to_meshenobound, open(os.path.join(self.source_dir, "meshe_to_meshenobound.pkl"), "wb"))
+            print(f"Variables saved in {self.source_dir}")
 
         ### NOTE: BASE WEIGHTS INITIALIZED HERE
         if self.args.softpoisson == "edges":
@@ -276,7 +346,7 @@ class SourceMesh:
                     self.initweights = torch.ones(len(self.edge_vpairs), device=device).double() * -10
                 else:
                     self.initweights = torch.ones(len(self.edge_vpairs), device=device).double()
-            elif self.args.spweight == "softmax":
+            elif self.args.spweight in ["softmax", "nonzero"]:
                 self.initweights = torch.ones(len(self.edge_vpairs), device=device).double()
             elif self.args.spweight in ["seamless", 'cosine']:
                 if self.init == "isometric":
@@ -285,6 +355,22 @@ class SourceMesh:
                     self.initweights = torch.ones(len(self.edge_vpairs), device=device).double() * 0.5
             else:
                 raise NotImplementedError(f"Soft poisson weight {self.args.spweight} not implemented!")
+
+        ### Load ground truth jacobians + weights if set
+        if self.args.gtnetworkloss:
+            self.gt_jacobians = torch.load(os.path.join(self.source_dir, "..", "..", "gt_j.pt"))
+
+            # GT weights (need to be mapped to network output)
+            with open(os.path.join(self.source_dir, "..", "..", "gt_cutvpairs.pkl"), 'rb') as f:
+                self.gt_cutvpairs = pickle.load(f)
+
+            # NOTE: network output is ordered by edge indexing
+            # TODO: map vpairs to edge indexes (vpair_to_meshe)
+            self.gt_weights = torch.ones(len(self.edge_vpairs), device=device).double()
+            cut_es = [self.meshe_to_meshenobound[self.vpair_to_meshe[frozenset(vpair)]] for vpair in self.gt_cutvpairs if self.vpair_to_meshe[frozenset(vpair)] in self.meshe_to_meshenobound.keys()]
+            self.gt_weights[cut_es] = 0
+            self.__loaded_data['gt_weights'] = self.gt_weights
+            self.__loaded_data['gt_jacobians'] = self.gt_jacobians
 
         self.__loaded_data['valid_edge_pairs'] = self.valid_edge_pairs
         self.__loaded_data['facepairs'] = self.facepairs
@@ -434,7 +520,7 @@ class SourceMesh:
 
                             if self.args.spweight == "sigmoid":
                                 self.initweights[eidx_nobound] = -10
-                            elif self.args.spweight == "softmax":
+                            elif self.args.spweight == ["softmax", "nonzero"]:
                                 self.initweights[eidx_nobound] = 0
                             elif self.args.spweight in ["seamless", "cosine"]:
                                 self.initweights[eidx_nobound] = -0.5
@@ -516,8 +602,14 @@ class SourceMesh:
                     vertsw = []
                     for v in range(len(vertices)):
                         vertes = torch.where(self.ogedge_vpairs_nobound == v)[0]
-                        vertw = torch.mean(self.initweights[vertes])
-                        vertsw.append(vertw) # scalar
+
+                        # All adjacent edges to vertex are cut
+                        if len(vertes) == 0:
+                            vertsw.append(torch.zeros(1, device=device))
+                        else:
+                            vertw = torch.mean(self.initweights[vertes])
+                            vertsw.append(vertw) # scalar
+
                     vertsw = torch.tensor(vertsw).unsqueeze(1)
                     self.input_features = torch.cat([self.input_features, vertsw], dim=1)
                 else:
@@ -534,18 +626,142 @@ class SourceMesh:
             # plt.savefig(f"scratch/{self.source_ind}.png")
             # plt.close(fig)
             # plt.cla()
+
+        elif self.init == "precut":
+            if os.path.exists(os.path.join(self.source_dir, "prefuv.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "preuv.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, "prej.pt")) and \
+                os.path.exists(os.path.join(self.source_dir, f"preinitweights_{self.args.softpoisson}.pt")):
+
+                self.prefuv = torch.load(os.path.join(self.source_dir, "prefuv.pt"))
+                self.preuv = torch.load(os.path.join(self.source_dir, "preuv.pt"))
+                self.prej = torch.load(os.path.join(self.source_dir, "prej.pt"))
+                self.initweights = torch.load(os.path.join(self.source_dir, f"preinitweights_{self.args.softpoisson}.pt"))
+
+                # Get delete idxs and remove from keepidxs
+                if self.args.removecutfromloss:
+                    deleteidxs = np.where(self.initweights < 0)[0]
+                    self.keepidxs = np.delete(self.keepidxs, deleteidxs)
+            else:
+                from utils import get_local_tris
+
+                vertices = self.source_vertices
+                device = vertices.device
+                faces = self.get_source_triangles()
+                mesh = Mesh(vertices.detach().cpu().numpy(), faces)
+                ogvs, ogfs, oges = mesh.export_soup()
+                ogmesh = Mesh(ogvs, ogfs)
+
+                # We load the cutmesh along with the cut vpairs to initialize the pre embedding
+                cutsoup = PolygonSoup.from_obj(os.path.join(self.source_dir, "..", "..", f"{self.source_ind}.obj"))
+                initcuts = pickle.load(open(os.path.join(self.source_dir, "..", "..", "initialcuts.pkl"), "rb"))
+
+                vertices = torch.from_numpy(ogvs).to(device)
+                faces = torch.from_numpy(ogfs).long().to(device)
+                fverts = vertices[faces]
+
+                self.preuv = torch.from_numpy(cutsoup.uvs).unsqueeze(0) # 1 x V x 2
+
+                # Convert everything to soup indexing for Jacobian calculation
+                self.preuv = self.preuv[:, cutsoup.face_uv.astype(int)].reshape(1, -1, 2)
+
+                # Convert pre to 3-dim
+                self.preuv = torch.cat([self.preuv, torch.zeros(self.preuv.shape[0], self.preuv.shape[1], 1)], dim=-1)
+
+                # Get Jacobians
+                soupvs = torch.from_numpy(cutsoup.vertices[cutsoup.indices].reshape(-1, 3)).to(device)
+                soupfs = torch.arange(len(cutsoup.indices)*3, device=device).reshape(len(faces), 3)
+                self.prej = get_jacobian_torch(soupvs, soupfs, self.preuv.squeeze()[:,:2], device=device).double() # F x 2 x 3
+                self.prej = torch.cat([self.prej, torch.zeros(self.prej.shape[0], 1, self.prej.shape[2])], dim=1)
+
+                deleteidxs = []
+                for cutvpair in initcuts:
+                    eidx = self.vpair_to_meshe[cutvpair]
+                    if eidx not in self.meshe_to_meshenobound.keys(): continue
+                    eidx_nobound = self.meshe_to_meshenobound[eidx]
+                    deleteidxs.append(eidx_nobound)
+
+                    if self.args.spweight == "sigmoid":
+                        self.initweights[eidx_nobound] = -10
+                    elif self.args.spweight == ["softmax", "nonzero"]:
+                        self.initweights[eidx_nobound] = -2
+                    elif self.args.spweight in ["seamless", "cosine"]:
+                        self.initweights[eidx_nobound] = -0.5
+
+                if self.args.removecutfromloss:
+                    self.keepidxs = np.delete(self.keepidxs, deleteidxs)
+
+                # Unit Test: jacobians recover pre uvs
+                fverts = vertices[faces]
+                pred_V = torch.einsum("abc,acd->abd", (fverts, self.prej[:,:2,:].transpose(2,1)))
+
+                checkpre = self.preuv[0,soupfs,:2]
+                self.prefuv = self.preuv[:,soupfs,:2] # B x F x 3 x 2
+
+                diff = pred_V - checkpre
+                diff -= torch.mean(diff, dim=1, keepdim=True) # Removes effect of per-triangle clobal translation
+                torch.testing.assert_allclose(diff.float(), torch.zeros(diff.shape), rtol=1e-4, atol=1e-4)
+
+                # Cache everything
+                torch.save(self.prefuv, os.path.join(self.source_dir, "prefuv.pt"))
+                torch.save(self.preuv, os.path.join(self.source_dir, "preuv.pt"))
+                torch.save(self.prej, os.path.join(self.source_dir, "prej.pt"))
+                torch.save(self.initweights, os.path.join(self.source_dir, f"preinitweights_{self.args.softpoisson}.pt"))
+
+            ## Store in loaded data so it gets mapped to device
+            # Remove extraneous dimension
+            self.__loaded_data['prefuv'] = self.prefuv
+            self.__loaded_data['preuv'] = self.preuv
+            self.__loaded_data['prej'] = self.prej
+            self.__loaded_data['initweights'] = self.initweights
+
+            if self.initjinput:
+                if self.args.arch == "diffusionnet":
+                    # Map face Jacobians to vertices by aggregating all Jacobians for each incident vertex
+                    vertsj = []
+                    for v in range(len(vertices)):
+                        vertfs = np.where(faces == v)[0]
+                        vertj = torch.mean(self.prej[vertfs], dim=0)
+                        vertsj.append(vertj.flatten()) # 6-dim
+                    vertsj = torch.stack(vertsj, dim=0) # V x 6
+                    self.input_features = torch.cat([self.input_features, vertsj], dim=1)
+                else:
+                    self.input_features = torch.cat([self.input_features, self.prej.reshape(len(self.input_features), -1)], dim=1)
+
+            if self.args.initweightinput:
+                if self.args.arch == "diffusionnet":
+                    # Each vertex gets average of incident edge weights
+                    vertsw = []
+                    for v in range(len(vertices)):
+                        vertes = torch.where(self.ogedge_vpairs_nobound == v)[0]
+                        # All adjacent edges to vertex are cut
+                        if len(vertes) == 0:
+                            vertsw.append(torch.zeros(1, device=device))
+                        else:
+                            vertw = torch.mean(self.initweights[vertes])
+                            vertsw.append(vertw) # scalar
+                    vertsw = torch.tensor(vertsw).unsqueeze(1)
+                    self.input_features = torch.cat([self.input_features, vertsw], dim=1)
+                else:
+                    self.input_features = torch.cat([self.input_features, torch.stack([self.initweights] * self.input_features.shape[0], dim=0).to(self.input_features.device)], dim=1)
+
         elif self.init == "slim":
             if os.path.exists(os.path.join(self.source_dir, "slimfuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "slimuv.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "slimj.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, "slimtranslate.pt")) and \
                 os.path.exists(os.path.join(self.source_dir, f"sliminitweights_{self.args.softpoisson}.pt")) and \
-                    not new_init:
+                os.path.exists(os.path.join(self.source_dir, "cutvs.npy")) and \
+                os.path.exists(os.path.join(self.source_dir, "cutfs.npy")) and \
+                    not new_init and self.args.ignorei == 0:
+
                 self.slimfuv = torch.load(os.path.join(self.source_dir, "slimfuv.pt"))
                 self.slimuv = torch.load(os.path.join(self.source_dir, "slimuv.pt"))
                 self.slimj = torch.load(os.path.join(self.source_dir, "slimj.pt"))
                 self.slimtranslate = torch.load(os.path.join(self.source_dir, "slimtranslate.pt"))
                 self.initweights = torch.load(os.path.join(self.source_dir, f"sliminitweights_{self.args.softpoisson}.pt"))
+                self.cutvs = np.load(os.path.join(self.source_dir, "cutvs.npy"))
+                self.cutfs = np.load(os.path.join(self.source_dir, "cutfs.npy"))
 
                 # Get delete idxs and remove from keepidxs
                 if self.args.removecutfromloss:
@@ -565,16 +781,16 @@ class SourceMesh:
                 faces = torch.from_numpy(ogfs).long().to(device)
                 fverts = vertices[faces]
 
-                if new_init:
-                    rng = default_rng()
-                    n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
+                rng = default_rng()
+                n_cuts = rng.integers(self.args.min_cuts, self.args.max_cuts+1)
+                cutvs = None
+                if self.args.simplecut and n_cuts > 0:
+                    cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
+                else:
+                    cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
 
-                    if self.args.simplecut and n_cuts > 0:
-                        cutvs = generate_boundary_cut(mesh, max_cuts = n_cuts)
-                    else:
-                        cutvs = generate_random_cuts(mesh, enforce_disk_topo=True, max_cuts = n_cuts)
-
-                    # Unit test: mesh is still connected
+                # Unit test: mesh is still connected
+                if cutvs is not None:
                     vs, fs, es = mesh.export_soup()
                     testsoup = PolygonSoup(vs, fs)
                     n_components = testsoup.nConnectedComponents()
@@ -583,6 +799,10 @@ class SourceMesh:
                     # Save new topology
                     self.cutvs = vs
                     self.cutfs = fs
+
+                    cutsoup = vs[fs]
+                    ogsoup = ogvs[ogfs]
+                    np.testing.assert_allclose(cutsoup, ogsoup)
 
                     # Only replace SLIM if nan
                     newslim = torch.from_numpy(SLIM(mesh, iters=self.args.slimiters)[0]).unsqueeze(0) # 1 x V x 2
@@ -601,6 +821,7 @@ class SourceMesh:
                             print("SLIM Jacobians have NaNs!")
                         else:
                             set_new_slim = True
+
                     # Otherwise, just use SLIM with no cutting
                     if not set_new_slim:
                         self.slimuv = torch.from_numpy(SLIM(ogmesh, iters=self.args.slimiters)[0]).unsqueeze(0) # 1 x V x 2
@@ -625,7 +846,7 @@ class SourceMesh:
 
                             if self.args.spweight == "sigmoid":
                                 self.initweights[eidx_nobound] = -10
-                            elif self.args.spweight == "softmax":
+                            elif self.args.spweight == ["softmax", "nonzero"]:
                                 self.initweights[eidx_nobound] = -2
                             elif self.args.spweight in ["seamless", "cosine"]:
                                 self.initweights[eidx_nobound] = -0.5
@@ -674,6 +895,9 @@ class SourceMesh:
                     torch.save(self.slimtranslate, os.path.join(self.source_dir, "slimtranslate.pt"))
                     torch.save(self.initweights, os.path.join(self.source_dir, f"sliminitweights_{self.args.softpoisson}.pt"))
 
+                    np.save(os.path.join(self.source_dir, f"cutvs.npy"), self.cutvs)
+                    np.save(os.path.join(self.source_dir, f"cutfs.npy"), self.cutfs)
+
             ## Store in loaded data so it gets mapped to device
             # Remove extraneous dimension
             self.__loaded_data['slimfuv'] = self.slimfuv
@@ -701,8 +925,12 @@ class SourceMesh:
                     vertsw = []
                     for v in range(len(vertices)):
                         vertes = torch.where(self.ogedge_vpairs_nobound == v)[0]
-                        vertw = torch.mean(self.initweights[vertes])
-                        vertsw.append(vertw) # scalar
+                        # All adjacent edges to vertex are cut
+                        if len(vertes) == 0:
+                            vertsw.append(torch.zeros(1, device=device))
+                        else:
+                            vertw = torch.mean(self.initweights[vertes])
+                            vertsw.append(vertw) # scalar
                     vertsw = torch.tensor(vertsw).unsqueeze(1)
                     self.input_features = torch.cat([self.input_features, vertsw], dim=1)
                 else:
@@ -848,8 +1076,14 @@ class SourceMesh:
                     vertsw = []
                     for v in range(len(vertices)):
                         vertes = torch.where(self.ogedge_vpairs_nobound == v)[0]
-                        vertw = torch.mean(self.initweights[vertes])
-                        vertsw.append(vertw) # scalar
+
+                        # All adjacent edges to vertex are cut
+                        if len(vertes) == 0:
+                            vertsw.append(torch.zeros(1, device=device))
+                        else:
+                            vertw = torch.mean(self.initweights[vertes])
+                            vertsw.append(vertw) # scalar
+
                     vertsw = torch.tensor(vertsw).unsqueeze(1)
                     self.input_features = torch.cat([self.input_features, vertsw], dim=1)
                 else:
